@@ -160,12 +160,42 @@ if [ -f "$PIPER_DIR/piper" ]; then
 else
     print_info "Downloading Piper for $PIPER_ARCH..."
     
-    PIPER_URL="https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_linux_${PIPER_ARCH}.tar.gz"
+    # Try different Piper versions/URLs
+    PIPER_URLS=(
+        "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_${PIPER_ARCH}.tar.gz"
+        "https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_linux_${PIPER_ARCH}.tar.gz"
+        "https://github.com/rhasspy/piper/releases/latest/download/piper_linux_${PIPER_ARCH}.tar.gz"
+    )
     
-    wget -q "$PIPER_URL" -O /tmp/piper.tar.gz
-    tar -xzf /tmp/piper.tar.gz -C "$PIPER_DIR" --strip-components=1
-    rm /tmp/piper.tar.gz
-    chmod +x "$PIPER_DIR/piper"
+    DOWNLOAD_SUCCESS=false
+    for PIPER_URL in "${PIPER_URLS[@]}"; do
+        print_info "Trying: $PIPER_URL"
+        if wget --timeout=30 -q "$PIPER_URL" -O /tmp/piper.tar.gz; then
+            if [ -s /tmp/piper.tar.gz ]; then
+                DOWNLOAD_SUCCESS=true
+                break
+            fi
+        fi
+    done
+    
+    if [ "$DOWNLOAD_SUCCESS" = false ]; then
+        print_error "Failed to download Piper. Please download manually:"
+        print_error "https://github.com/rhasspy/piper/releases"
+        exit 1
+    fi
+    
+    print_info "Extracting Piper..."
+    tar -xzf /tmp/piper.tar.gz -C "$PIPER_DIR" --strip-components=1 || \
+    tar -xzf /tmp/piper.tar.gz -C "$PIPER_DIR"
+    
+    rm -f /tmp/piper.tar.gz
+    
+    # Find and make piper executable
+    if [ -f "$PIPER_DIR/piper" ]; then
+        chmod +x "$PIPER_DIR/piper"
+    elif [ -f "$PIPER_DIR/piper/piper" ]; then
+        chmod +x "$PIPER_DIR/piper/piper"
+    fi
     
     print_success "Piper installed"
 fi
@@ -179,8 +209,18 @@ else
     VOICE_URL="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx"
     CONFIG_URL="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json"
     
-    wget -q "$VOICE_URL" -O "$MODELS_DIR/en_US-lessac-medium.onnx"
-    wget -q "$CONFIG_URL" -O "$MODELS_DIR/en_US-lessac-medium.onnx.json"
+    print_info "Downloading voice model (this may take a minute)..."
+    if ! wget --timeout=60 --progress=bar:force "$VOICE_URL" -O "$MODELS_DIR/en_US-lessac-medium.onnx"; then
+        print_error "Failed to download voice model"
+        print_warning "You can download it manually from:"
+        print_warning "$VOICE_URL"
+        exit 1
+    fi
+    
+    if ! wget --timeout=30 -q "$CONFIG_URL" -O "$MODELS_DIR/en_US-lessac-medium.onnx.json"; then
+        print_error "Failed to download voice config"
+        exit 1
+    fi
     
     print_success "Piper voice model downloaded"
 fi
