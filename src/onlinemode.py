@@ -26,7 +26,7 @@ ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")  
 ELEVENLABS_MODEL = "eleven_turbo_v2_5"  # Fastest model
 
 # Groq Model Settings
-GROQ_LLM_MODEL = "llama-3.1-70b-versatile"  # Smart + Fast
+GROQ_LLM_MODEL = "openai/gpt-oss-120b"      # GPT-OSS 120B
 GROQ_STT_MODEL = "whisper-large-v3-turbo"   # Fastest Whisper
 
 # Audio Settings
@@ -149,7 +149,8 @@ def initialize():
         test = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": "Hi"}],
             model=GROQ_LLM_MODEL,
-            max_tokens=5
+            max_completion_tokens=10,
+            reasoning_effort="low"
         )
         print(f"✅ Groq connected ({GROQ_LLM_MODEL})")
         
@@ -317,10 +318,12 @@ def get_response(user_text):
         stream = groq_client.chat.completions.create(
             messages=messages,
             model=GROQ_LLM_MODEL,
-            max_tokens=150,
+            max_completion_tokens=256,
             temperature=0.7,
             top_p=0.9,
-            stream=True
+            reasoning_effort="low",  # low/medium/high - low is fastest
+            stream=True,
+            stop=None
         )
         
         # Collect streamed response
