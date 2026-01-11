@@ -107,6 +107,10 @@ groq_client = None
 elevenlabs_client = None
 audio = None
 
+# Global device indices (set during initialization)
+INPUT_DEVICE_INDEX = None
+OUTPUT_DEVICE_INDEX = None
+
 # Conversation memory (last 5 turns)
 conversation_history = deque(maxlen=10)
 
@@ -170,9 +174,50 @@ def initialize():
     
     try:
         # Initialize PyAudio
-        print("🎤 Initializing microphone...")
+        print("🎤 Initializing audio devices...")
         audio = pyaudio.PyAudio()
-        print("✅ Microphone ready")
+        
+        # Find input device (microphone)
+        input_device = None
+        output_device = None
+        
+        print("\n   Available audio devices:")
+        for i in range(audio.get_device_count()):
+            info = audio.get_device_info_by_index(i)
+            has_input = info['maxInputChannels'] > 0
+            has_output = info['maxOutputChannels'] > 0
+            
+            markers = []
+            if has_input:
+                markers.append("🎤")
+                if input_device is None:
+                    input_device = i
+            if has_output:
+                markers.append("🔊")
+                if output_device is None:
+                    output_device = i
+            
+            if markers:
+                print(f"   [{i}] {' '.join(markers)} {info['name']}")
+        
+        if input_device is None:
+            print("\n❌ No microphone found!")
+            print("   Check: arecord -l")
+            return False
+        
+        if output_device is None:
+            print("\n❌ No speakers found!")
+            print("   Check: aplay -l")
+            return False
+        
+        print(f"\n   Using input device [{input_device}]")
+        print(f"   Using output device [{output_device}]")
+        print("✅ Audio devices ready")
+        
+        # Store device indices globally
+        global INPUT_DEVICE_INDEX, OUTPUT_DEVICE_INDEX
+        INPUT_DEVICE_INDEX = input_device
+        OUTPUT_DEVICE_INDEX = output_device
         
     except Exception as e:
         print(f"❌ Audio error: {e}")
@@ -200,12 +245,14 @@ def record_audio(max_duration=15, silence_threshold=500, silence_duration=1.5):
                 channels=CHANNELS,
                 rate=rate,
                 input=True,
+                input_device_index=INPUT_DEVICE_INDEX,
                 frames_per_buffer=CHUNK_SIZE
             )
             used_rate = rate
-            print(f"🎤 Listening... (Sample rate: {rate}Hz)")
+            print(f"🎤 Listening... (Device: {INPUT_DEVICE_INDEX}, Rate: {rate}Hz)")
             break
-        except OSError:
+        except OSError as e:
+            print(f"   Rate {rate}Hz failed: {e}")
             continue
     
     if stream is None:
@@ -385,12 +432,13 @@ def speak(text):
         
         metrics["tts_latency"] = (time.time() - start_time) * 1000
         
-        # Play audio using PyAudio
+        # Play audio using PyAudio with the correct output device
         play_stream = audio.open(
             format=pyaudio.paInt16,
             channels=1,
             rate=22050,
-            output=True
+            output=True,
+            output_device_index=OUTPUT_DEVICE_INDEX
         )
         
         play_stream.write(audio_chunks)
