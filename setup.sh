@@ -49,6 +49,8 @@ print_info "Updating package list..."
 sudo apt update
 
 print_info "Installing system dependencies..."
+
+# Fix for newer Raspberry Pi OS versions
 sudo apt install -y \
     python3-pip \
     python3-venv \
@@ -56,11 +58,16 @@ sudo apt install -y \
     portaudio19-dev \
     libportaudio2 \
     libasound2-dev \
-    libatlas-base-dev \
     ffmpeg \
     git \
     curl \
     wget
+
+# Install ATLAS/BLAS (package name varies by OS version)
+sudo apt install -y libatlas-base-dev 2>/dev/null || \
+sudo apt install -y libatlas3-base 2>/dev/null || \
+sudo apt install -y libopenblas-dev 2>/dev/null || \
+print_warning "ATLAS/BLAS not installed (numpy may be slower)"
 
 print_success "System dependencies installed"
 
