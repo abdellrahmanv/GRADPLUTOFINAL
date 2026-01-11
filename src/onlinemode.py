@@ -30,7 +30,7 @@ GROQ_LLM_MODEL = "openai/gpt-oss-120b"      # GPT-OSS 120B
 GROQ_STT_MODEL = "whisper-large-v3-turbo"   # Fastest Whisper
 
 # Audio Settings
-SAMPLE_RATE = 16000
+SAMPLE_RATE = 44100  # More compatible sample rate
 CHANNELS = 1
 CHUNK_SIZE = 4096
 
@@ -188,21 +188,35 @@ def initialize():
 def record_audio(max_duration=15, silence_threshold=500, silence_duration=1.5):
     """Record audio from microphone with voice activity detection"""
     
-    stream = audio.open(
-        format=pyaudio.paInt16,
-        channels=CHANNELS,
-        rate=SAMPLE_RATE,
-        input=True,
-        frames_per_buffer=CHUNK_SIZE
-    )
+    # Try different sample rates for compatibility
+    sample_rates = [44100, 48000, 16000, 22050, 8000]
+    stream = None
+    used_rate = SAMPLE_RATE
     
-    print("🎤 Listening...")
+    for rate in sample_rates:
+        try:
+            stream = audio.open(
+                format=pyaudio.paInt16,
+                channels=CHANNELS,
+                rate=rate,
+                input=True,
+                frames_per_buffer=CHUNK_SIZE
+            )
+            used_rate = rate
+            print(f"🎤 Listening... (Sample rate: {rate}Hz)")
+            break
+        except OSError:
+            continue
+    
+    if stream is None:
+        print("❌ Could not open microphone with any sample rate")
+        return None
     
     frames = []
     is_speaking = False
     silence_chunks = 0
-    silence_threshold_chunks = int(silence_duration * SAMPLE_RATE / CHUNK_SIZE)
-    max_chunks = int(max_duration * SAMPLE_RATE / CHUNK_SIZE)
+    silence_threshold_chunks = int(silence_duration * used_rate / CHUNK_SIZE)
+    max_chunks = int(max_duration * used_rate / CHUNK_SIZE)
     
     import numpy as np
     
@@ -236,12 +250,12 @@ def record_audio(max_duration=15, silence_threshold=500, silence_duration=1.5):
     if not is_speaking:
         return None
     
-    # Convert to WAV bytes
+    # Convert to WAV bytes with the actual sample rate used
     wav_buffer = io.BytesIO()
     with wave.open(wav_buffer, 'wb') as wf:
         wf.setnchannels(CHANNELS)
         wf.setsampwidth(audio.get_sample_size(pyaudio.paInt16))
-        wf.setframerate(SAMPLE_RATE)
+        wf.setframerate(used_rate)
         wf.writeframes(b''.join(frames))
     
     wav_buffer.seek(0)
