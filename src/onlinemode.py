@@ -424,29 +424,128 @@ def speak(text):
             voice_id=ELEVENLABS_VOICE_ID,
             text=text,
             model_id=ELEVENLABS_MODEL,
-            output_format="pcm_22050"  # Raw PCM for faster playback
+            output_format="mp3_44100_128"  # MP3 format for better compatibility
         )
         
         # Collect audio chunks
-        audio_chunks = b''.join(audio_generator)
+        audio_data = b''.join(audio_generator)
         
         metrics["tts_latency"] = (time.time() - start_time) * 1000
+        print(f"   TTS generated: {len(audio_data)} bytes ({metrics['tts_latency']:.0f}ms)")
         
-        # Play audio using PyAudio with the correct output device
-        play_stream = audio.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=22050,
-            output=True,
-            output_device_index=OUTPUT_DEVICE_INDEX
-        )
+        # Save to temp file and play with system audio
+        import subprocess
+        import tempfile
         
-        play_stream.write(audio_chunks)
-        play_stream.stop_stream()
-        play_stream.close()
+        with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as f:
+            f.write(audio_data)
+            temp_path = f.name
+        
+        print(f"   Playing audio file: {temp_path}")
+        
+        # Try multiple playback methods
+        played = False
+        
+        # Method 1: mpv (best quality)
+        if not played:
+            try:
+                result = subprocess.run(
+                    ['mpv', '--no-terminal', '--no-video', temp_path],
+                    timeout=60, capture_output=True
+                )
+                if result.returncode == 0:
+                    played = True
+                    print("   Played with: mpv")
+            except:
+                pass
+        
+        # Method 2: ffplay
+        if not played:
+            try:
+                result = subprocess.run(
+                    ['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', temp_path],
+                    timeout=60, capture_output=True
+                )
+                if result.returncode == 0:
+                    played = True
+                    print("   Played with: ffplay")
+            except:
+                pass
+        
+        # Method 3: aplay with conversion
+        if not played:
+            try:
+                # Convert MP3 to WAV first
+                wav_path = temp_path.replace('.mp3', '.wav')
+                subprocess.run(
+                    ['ffmpeg', '-y', '-i', temp_path, '-ar', '44100', '-ac', '1', wav_path],
+                    timeout=30, capture_output=True
+                )
+                result = subprocess.run(
+                    ['aplay', wav_path],
+                    timeout=60, capture_output=True
+                )
+                if result.returncode == 0:
+                    played = True
+                    print("   Played with: aplay (converted)")
+                os.unlink(wav_path)
+            except:
+                pass
+        
+        # Method 4: pygame
+        if not played:
+            try:
+                import pygame
+                pygame.mixer.init()
+                pygame.mixer.music.load(temp_path)
+                pygame.mixer.music.play()
+                while pygame.mixer.music.get_busy():
+                    time.sleep(0.1)
+                played = True
+                print("   Played with: pygame")
+            except:
+                pass
+        
+        # Method 5: PyAudio with raw PCM (fallback)
+        if not played:
+            try:
+                print("   Trying PyAudio...")
+                # Re-request as PCM
+                audio_gen = elevenlabs_client.text_to_speech.convert(
+                    voice_id=ELEVENLABS_VOICE_ID,
+                    text=text,
+                    model_id=ELEVENLABS_MODEL,
+                    output_format="pcm_22050"
+                )
+                pcm_data = b''.join(audio_gen)
+                
+                play_stream = audio.open(
+                    format=pyaudio.paInt16,
+                    channels=1,
+                    rate=22050,
+                    output=True,
+                    output_device_index=OUTPUT_DEVICE_INDEX
+                )
+                play_stream.write(pcm_data)
+                play_stream.stop_stream()
+                play_stream.close()
+                played = True
+                print("   Played with: PyAudio")
+            except Exception as e:
+                print(f"   PyAudio failed: {e}")
+        
+        # Cleanup
+        try:
+            os.unlink(temp_path)
+        except:
+            pass
+        
+        if not played:
+            print("❌ Could not play audio with any method!")
+            print("   Install mpv: sudo apt install mpv")
         
         total_time = (time.time() - start_time) * 1000
-        print(f"   TTS: {metrics['tts_latency']:.0f}ms, Total: {total_time:.0f}ms")
+        print(f"   Total speak time: {total_time:.0f}ms")
         
     except Exception as e:
         print(f"❌ TTS error: {e}")
