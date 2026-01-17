@@ -37,7 +37,7 @@ PIPER_MODEL = str(MODELS_DIR / "en_US-lessac-medium.onnx")
 
 # Ollama config - 0.5B is fastest on Pi4
 OLLAMA_HOST = "http://localhost:11434"
-OLLAMA_MODEL = "qwen2.5:0.5b-instruct-q2_K"  # Use instruct version
+OLLAMA_MODEL = "qwen2.5:0.5b-instruct-q2_k"  # Use instruct version (lowercase k!)
 MAX_TOKENS = 80
 MAX_HISTORY = 4
 

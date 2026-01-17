@@ -41,7 +41,7 @@ fi
 echo -e "${GREEN}✅ Ollama running${NC}"
 
 # Check/pull the model
-MODEL="qwen2.5:0.5b-instruct-q2_K"
+MODEL="qwen2.5:0.5b-instruct-q2_k"
 echo -e "${BLUE}ℹ️  Checking LLM model...${NC}"
 if ! ollama list | grep -q "qwen2.5:0.5b"; then
     echo -e "${YELLOW}⚠️  Model not found. Pulling $MODEL (~400MB)...${NC}"
