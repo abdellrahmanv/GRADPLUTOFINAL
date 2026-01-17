@@ -168,11 +168,36 @@ def check_piper():
         print(f"   ❌ Piper error: {e}")
         return False
 
+def test_microphone():
+    """Quick mic test"""
+    print(f"🎤 Testing microphone ({AUDIO_DEVICE_MIC})...")
+    
+    try:
+        # Record 1 second
+        result = subprocess.run(
+            ['arecord', '-D', AUDIO_DEVICE_MIC, '-f', 'S16_LE', '-r', str(MIC_SAMPLE_RATE), 
+             '-c', '1', '-d', '1', '-q', '/dev/null'],
+            capture_output=True, timeout=5
+        )
+        
+        if result.returncode == 0:
+            print(f"   ✅ Microphone working")
+            return True
+        else:
+            print(f"   ❌ Mic error: {result.stderr.decode()}")
+            return False
+    except Exception as e:
+        print(f"   ❌ Mic test failed: {e}")
+        return False
+
 def initialize():
     """Initialize all components"""
     print("\n" + "=" * 60)
     print("🪐 PLUTO v2 - Offline Mode")
     print("=" * 60 + "\n")
+    
+    if not test_microphone():
+        return False
     
     if not init_whisper():
         return False
@@ -301,13 +326,15 @@ def transcribe(audio_path):
         
         print(f"      Array: {len(audio_float)} samples, max={np.max(np.abs(audio_float)):.3f}")
         
-        # Transcribe - disable VAD since we already did VAD during recording
+        # Transcribe - use fastest settings
         segments, info = whisper_model.transcribe(
             audio_float,
             language="en",
-            beam_size=3,
+            beam_size=1,  # Fastest
+            best_of=1,
             vad_filter=False,  # Disabled - we handle VAD ourselves
-            condition_on_previous_text=False
+            condition_on_previous_text=False,
+            without_timestamps=True  # Faster
         )
         
         # Collect all segments
@@ -355,28 +382,48 @@ def get_response(user_text):
     prompt += "Pluto:"
     
     start_time = time.time()
+    first_token_time = None
     
     try:
+        # Use streaming for faster first token
         response = requests.post(
             f"{OLLAMA_HOST}/api/generate",
             json={
                 "model": OLLAMA_MODEL,
                 "prompt": prompt,
-                "stream": False,
+                "stream": True,
                 "options": {
                     "num_predict": MAX_TOKENS,
                     "temperature": 0.7,
                     "top_p": 0.9,
+                    "num_ctx": 512,  # Smaller context for speed
                 }
             },
-            timeout=30
+            timeout=30,
+            stream=True
         )
         
         if response.status_code != 200:
             print(f"   ❌ Ollama error: {response.status_code}")
             return None
         
-        result = response.json().get("response", "").strip()
+        # Collect streamed response
+        result = ""
+        for line in response.iter_lines():
+            if line:
+                import json
+                data = json.loads(line)
+                token = data.get("response", "")
+                result += token
+                
+                if first_token_time is None and token:
+                    first_token_time = time.time()
+                    print(f"   First token: {(first_token_time - start_time)*1000:.0f}ms")
+                
+                if data.get("done", False):
+                    break
+        
+        result = result.strip()
         
         metrics["llm_latency"] = (time.time() - start_time) * 1000
         
