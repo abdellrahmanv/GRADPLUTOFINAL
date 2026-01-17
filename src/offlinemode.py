@@ -69,18 +69,24 @@ def init_whisper():
     
     # Use 'small' for best accuracy on Pi4
     # Options: tiny < base < small < medium (bigger = more accurate but slower)
-    MODEL_SIZE = "small"  
+    MODEL_SIZE = "small"
     
     print(f"🎤 Loading Whisper ({MODEL_SIZE}, int8)...")
+    print("   (First run downloads ~250MB model - please wait)")
     
     try:
         from faster_whisper import WhisperModel
+        
+        # Use local cache directory
+        cache_dir = str(PROJECT_ROOT / "models" / "whisper")
+        os.makedirs(cache_dir, exist_ok=True)
         
         start = time.time()
         whisper_model = WhisperModel(
             MODEL_SIZE,
             device="cpu",
-            compute_type="int8"
+            compute_type="int8",
+            download_root=cache_dir
         )
         
         # Warmup
