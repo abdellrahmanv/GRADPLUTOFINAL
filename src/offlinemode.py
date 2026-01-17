@@ -35,11 +35,11 @@ MODELS_DIR = PROJECT_ROOT / "models"
 PIPER_BINARY = str(PIPER_DIR / "piper")
 PIPER_MODEL = str(MODELS_DIR / "en_US-lessac-medium.onnx")
 
-# Ollama config - use 1.5B for much better responses
+# Ollama config - 0.5B is fastest on Pi4
 OLLAMA_HOST = "http://localhost:11434"
-OLLAMA_MODEL = "qwen2.5:1.5b-instruct-q4_K_M"  # Better model, still fast on Pi4
-MAX_TOKENS = 100
-MAX_HISTORY = 6
+OLLAMA_MODEL = "qwen2.5:0.5b"  # Smallest, fastest
+MAX_TOKENS = 80
+MAX_HISTORY = 4
 
 # VAD settings - tuned for USB mic
 ENERGY_THRESHOLD = 200  # Lower = more sensitive
@@ -115,7 +115,7 @@ def check_ollama():
     
     try:
         # Check server
-        response = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=5)
+        response = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=10)
         if response.status_code != 200:
             print("   ❌ Ollama server not responding")
             return False
@@ -126,14 +126,15 @@ def check_ollama():
         
         if not any(OLLAMA_MODEL in name for name in model_names):
             print(f"   ⚠️  Model {OLLAMA_MODEL} not found. Pulling...")
-            subprocess.run(["ollama", "pull", OLLAMA_MODEL], timeout=300)
+            subprocess.run(["ollama", "pull", OLLAMA_MODEL], timeout=600)
         
-        # Warmup
+        # Warmup with longer timeout
+        print("   Warming up LLM (first run takes longer)...")
         start = time.time()
         requests.post(
             f"{OLLAMA_HOST}/api/generate",
             json={"model": OLLAMA_MODEL, "prompt": "Hi", "stream": False},
-            timeout=30
+            timeout=120  # 2 minute timeout for first load
         )
         elapsed = (time.time() - start) * 1000
         
