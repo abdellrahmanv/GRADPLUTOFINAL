@@ -3,6 +3,10 @@
 🪐 PLUTO - ONLINE MODE (Ultimate API Power)
 Uses: Groq Whisper (STT) + Groq LLM + ElevenLabs (TTS)
 Optimized for Raspberry Pi 4
+
+Audio Config: Card 3 (USB PnP Sound Device / PCM2902)
+- Microphone: hw:3,0 (mono, 48000Hz)
+- Speaker: plughw:3,0 (stereo, auto-convert)
 """
 
 import os
@@ -11,11 +15,11 @@ import io
 import time
 import wave
 import tempfile
-import threading
+import subprocess
 from collections import deque
 
 # ==============================================================================
-# --- CONFIGURATION (Use Environment Variables!) ---
+# --- CONFIGURATION ---
 # ==============================================================================
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
@@ -29,10 +33,18 @@ ELEVENLABS_MODEL = "eleven_turbo_v2_5"  # Fastest model
 GROQ_LLM_MODEL = "openai/gpt-oss-120b"      # GPT-OSS 120B
 GROQ_STT_MODEL = "whisper-large-v3-turbo"   # Fastest Whisper
 
-# Audio Settings
-SAMPLE_RATE = 44100  # More compatible sample rate
-CHANNELS = 1
-CHUNK_SIZE = 4096
+# ==============================================================================
+# --- AUDIO SETTINGS (Card 3 - USB PnP Sound Device) ---
+# ==============================================================================
+
+AUDIO_CARD = 3
+AUDIO_DEVICE_MIC = f"hw:{AUDIO_CARD},0"      # Microphone (mono)
+AUDIO_DEVICE_SPEAKER = f"plughw:{AUDIO_CARD},0"  # Speaker (auto-converts to stereo)
+
+# Recording settings (must match your USB mic capabilities)
+MIC_SAMPLE_RATE = 48000
+MIC_CHANNELS = 1
+MIC_FORMAT = "S16_LE"
 
 # ==============================================================================
 # --- PLUTO'S PERSONALITY ---
@@ -63,17 +75,12 @@ Response guidelines:
 Always be cheerful and make visitors feel valued!"""
 
 # ==============================================================================
-# --- IMPORTS (with error handling) ---
+# --- IMPORTS ---
 # ==============================================================================
 
 def check_dependencies():
     """Check and report missing dependencies"""
     missing = []
-    
-    try:
-        import pyaudio
-    except ImportError:
-        missing.append("pyaudio")
     
     try:
         from groq import Groq
@@ -85,6 +92,11 @@ def check_dependencies():
     except ImportError:
         missing.append("elevenlabs")
     
+    try:
+        import numpy
+    except ImportError:
+        missing.append("numpy")
+    
     if missing:
         print("❌ Missing dependencies:")
         for pkg in missing:
@@ -95,9 +107,9 @@ def check_dependencies():
 
 check_dependencies()
 
-import pyaudio
 from groq import Groq
 from elevenlabs import ElevenLabs
+import numpy as np
 
 # ==============================================================================
 # --- GLOBAL STATE ---
@@ -105,11 +117,6 @@ from elevenlabs import ElevenLabs
 
 groq_client = None
 elevenlabs_client = None
-audio = None
-
-# Global device indices (set during initialization)
-INPUT_DEVICE_INDEX = None
-OUTPUT_DEVICE_INDEX = None
 
 # Conversation memory (last 5 turns)
 conversation_history = deque(maxlen=10)
@@ -127,11 +134,16 @@ metrics = {
 
 def initialize():
     """Initialize all API clients"""
-    global groq_client, elevenlabs_client, audio
+    global groq_client, elevenlabs_client
     
     print("\n" + "="*60)
     print("🪐 PLUTO - ONLINE MODE")
     print("="*60 + "\n")
+    
+    print(f"Audio Configuration:")
+    print(f"   Microphone: {AUDIO_DEVICE_MIC} (mono, {MIC_SAMPLE_RATE}Hz)")
+    print(f"   Speaker:    {AUDIO_DEVICE_SPEAKER} (stereo)")
+    print("")
     
     # Check API keys
     if not GROQ_API_KEY:
@@ -172,141 +184,108 @@ def initialize():
         print(f"❌ ElevenLabs error: {e}")
         return False
     
+    # Test audio devices
+    print("🎤 Testing audio devices...")
+    
+    # Test speaker with a quick beep
     try:
-        # Initialize PyAudio
-        print("🎤 Initializing audio devices...")
-        audio = pyaudio.PyAudio()
-        
-        # Find input device (microphone)
-        input_device = None
-        output_device = None
-        
-        print("\n   Available audio devices:")
-        for i in range(audio.get_device_count()):
-            info = audio.get_device_info_by_index(i)
-            has_input = info['maxInputChannels'] > 0
-            has_output = info['maxOutputChannels'] > 0
-            
-            markers = []
-            if has_input:
-                markers.append("🎤")
-                if input_device is None:
-                    input_device = i
-            if has_output:
-                markers.append("🔊")
-                if output_device is None:
-                    output_device = i
-            
-            if markers:
-                print(f"   [{i}] {' '.join(markers)} {info['name']}")
-        
-        if input_device is None:
-            print("\n❌ No microphone found!")
-            print("   Check: arecord -l")
-            return False
-        
-        if output_device is None:
-            print("\n❌ No speakers found!")
-            print("   Check: aplay -l")
-            return False
-        
-        print(f"\n   Using input device [{input_device}]")
-        print(f"   Using output device [{output_device}]")
-        print("✅ Audio devices ready")
-        
-        # Store device indices globally
-        global INPUT_DEVICE_INDEX, OUTPUT_DEVICE_INDEX
-        INPUT_DEVICE_INDEX = input_device
-        OUTPUT_DEVICE_INDEX = output_device
-        
+        result = subprocess.run(
+            ['speaker-test', '-D', AUDIO_DEVICE_SPEAKER, '-t', 'sine', '-f', '440', '-l', '1', '-p', '1'],
+            timeout=3,
+            capture_output=True
+        )
+        print("✅ Speaker working")
     except Exception as e:
-        print(f"❌ Audio error: {e}")
-        return False
+        print(f"⚠️  Speaker test skipped: {e}")
     
     print("\n✅ All systems online!\n")
     return True
 
 # ==============================================================================
-# --- STT: Speech-to-Text (Groq Whisper) ---
+# --- AUDIO RECORDING (using arecord) ---
 # ==============================================================================
 
-def record_audio(max_duration=15, silence_threshold=500, silence_duration=1.5):
-    """Record audio from microphone with voice activity detection"""
+def record_audio_vad(max_duration=15, silence_duration=1.5):
+    """Record audio with Voice Activity Detection"""
     
-    # Try different sample rates for compatibility
-    sample_rates = [44100, 48000, 16000, 22050, 8000]
-    stream = None
-    used_rate = SAMPLE_RATE
+    print("🎤 Listening... (speak now)")
     
-    for rate in sample_rates:
-        try:
-            stream = audio.open(
-                format=pyaudio.paInt16,
-                channels=CHANNELS,
-                rate=rate,
-                input=True,
-                input_device_index=INPUT_DEVICE_INDEX,
-                frames_per_buffer=CHUNK_SIZE
-            )
-            used_rate = rate
-            print(f"🎤 Listening... (Device: {INPUT_DEVICE_INDEX}, Rate: {rate}Hz)")
-            break
-        except OSError as e:
-            print(f"   Rate {rate}Hz failed: {e}")
-            continue
+    temp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+    temp_path = temp_wav.name
+    temp_wav.close()
     
-    if stream is None:
-        print("❌ Could not open microphone with any sample rate")
-        return None
+    # Record raw audio using arecord in background
+    cmd = [
+        'arecord',
+        '-D', AUDIO_DEVICE_MIC,
+        '-f', MIC_FORMAT,
+        '-c', str(MIC_CHANNELS),
+        '-r', str(MIC_SAMPLE_RATE),
+        '-t', 'wav',
+        temp_path
+    ]
     
-    frames = []
-    is_speaking = False
-    silence_chunks = 0
-    silence_threshold_chunks = int(silence_duration * used_rate / CHUNK_SIZE)
-    max_chunks = int(max_duration * used_rate / CHUNK_SIZE)
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     
-    import numpy as np
-    
-    for _ in range(max_chunks):
-        try:
-            data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
-            frames.append(data)
+    try:
+        # Monitor for voice activity by checking file size growth
+        speech_started = False
+        silence_count = 0
+        start_time = time.time()
+        last_size = 0
+        
+        while time.time() - start_time < max_duration:
+            time.sleep(0.2)
             
-            # Calculate audio energy
-            audio_data = np.frombuffer(data, dtype=np.int16)
-            energy = np.sqrt(np.mean(audio_data.astype(np.float32) ** 2))
-            
-            if energy > silence_threshold:
-                if not is_speaking:
-                    print("🎙️  Speech detected...")
-                    is_speaking = True
-                silence_chunks = 0
-            elif is_speaking:
-                silence_chunks += 1
-                if silence_chunks >= silence_threshold_chunks:
-                    print("   End of speech")
-                    break
+            if os.path.exists(temp_path):
+                current_size = os.path.getsize(temp_path)
+                growth_rate = current_size - last_size
+                last_size = current_size
+                
+                # Simple VAD based on data growth (audio coming in)
+                if growth_rate > 5000:  # Active audio
+                    if not speech_started:
+                        print("🎙️  Speech detected...")
+                        speech_started = True
+                    silence_count = 0
+                elif speech_started:
+                    silence_count += 1
                     
-        except Exception as e:
-            print(f"⚠️  Audio error: {e}")
-            break
-    
-    stream.stop_stream()
-    stream.close()
-    
-    if not is_speaking:
+                    # End after ~1.5 seconds of silence
+                    if silence_count >= int(silence_duration / 0.2):
+                        print("   End of speech")
+                        break
+        
+        # Stop recording
+        process.terminate()
+        process.wait(timeout=2)
+        
+        # Check if we got audio
+        if speech_started and os.path.exists(temp_path) and os.path.getsize(temp_path) > 5000:
+            with open(temp_path, 'rb') as f:
+                wav_data = f.read()
+            
+            os.unlink(temp_path)
+            
+            wav_buffer = io.BytesIO(wav_data)
+            wav_buffer.seek(0)
+            return wav_buffer
+        else:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+            print("   No speech detected")
+            return None
+            
+    except Exception as e:
+        print(f"❌ Recording error: {e}")
+        process.terminate()
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
         return None
-    
-    # Convert to WAV bytes with the actual sample rate used
-    wav_buffer = io.BytesIO()
-    with wave.open(wav_buffer, 'wb') as wf:
-        wf.setnchannels(CHANNELS)
-        wf.setsampwidth(audio.get_sample_size(pyaudio.paInt16))
-        wf.setframerate(used_rate)
-        wf.writeframes(b''.join(frames))
-    
-    wav_buffer.seek(0)
-    return wav_buffer
+
+# ==============================================================================
+# --- STT: Speech-to-Text (Groq Whisper) ---
+# ==============================================================================
 
 def transcribe_audio(audio_buffer):
     """Transcribe audio using Groq Whisper API"""
@@ -315,7 +294,7 @@ def transcribe_audio(audio_buffer):
     if audio_buffer is None:
         return None
     
-    print("📝 Transcribing with Groq Whisper...")
+    print("📝 Transcribing...")
     
     start_time = time.time()
     
@@ -351,7 +330,7 @@ def transcribe_audio(audio_buffer):
         return None
 
 # ==============================================================================
-# --- LLM: Language Model (Groq) with Streaming ---
+# --- LLM: Language Model (Groq) ---
 # ==============================================================================
 
 def get_response(user_text):
@@ -382,7 +361,7 @@ def get_response(user_text):
             max_completion_tokens=256,
             temperature=0.7,
             top_p=0.9,
-            reasoning_effort="low",  # low/medium/high - low is fastest
+            reasoning_effort="low",
             stream=True,
             stop=None
         )
@@ -407,11 +386,11 @@ def get_response(user_text):
         return "I'm having trouble thinking right now. Could you try again?"
 
 # ==============================================================================
-# --- TTS: Text-to-Speech (ElevenLabs) with Streaming ---
+# --- TTS: Text-to-Speech (ElevenLabs) ---
 # ==============================================================================
 
 def speak(text):
-    """Convert text to speech using ElevenLabs and play it"""
+    """Convert text to speech using ElevenLabs and play via aplay"""
     global metrics
     
     print("🔊 Speaking...")
@@ -419,137 +398,74 @@ def speak(text):
     start_time = time.time()
     
     try:
-        # Generate audio with streaming
+        # Generate audio from ElevenLabs
         audio_generator = elevenlabs_client.text_to_speech.convert(
             voice_id=ELEVENLABS_VOICE_ID,
             text=text,
             model_id=ELEVENLABS_MODEL,
-            output_format="mp3_44100_128"  # MP3 format for better compatibility
+            output_format="mp3_44100_128"
         )
         
-        # Collect audio chunks
+        # Collect audio data
         audio_data = b''.join(audio_generator)
         
         metrics["tts_latency"] = (time.time() - start_time) * 1000
         print(f"   TTS generated: {len(audio_data)} bytes ({metrics['tts_latency']:.0f}ms)")
         
-        # Save to temp file and play with system audio
-        import subprocess
-        import tempfile
-        
+        # Save to temp file
         with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as f:
             f.write(audio_data)
-            temp_path = f.name
+            mp3_path = f.name
         
-        print(f"   Playing audio file: {temp_path}")
+        # Convert to WAV and play using aplay
+        wav_path = mp3_path.replace('.mp3', '.wav')
         
-        # Try multiple playback methods
-        played = False
+        # Convert MP3 to WAV using ffmpeg
+        convert_result = subprocess.run(
+            ['ffmpeg', '-y', '-i', mp3_path, '-ar', '48000', '-ac', '2', wav_path],
+            capture_output=True,
+            timeout=30
+        )
         
-        # Method 1: mpv (best quality)
-        if not played:
+        if convert_result.returncode == 0 and os.path.exists(wav_path):
+            # Play using aplay
+            play_result = subprocess.run(
+                ['aplay', '-D', AUDIO_DEVICE_SPEAKER, wav_path],
+                capture_output=True,
+                timeout=60
+            )
+            
+            if play_result.returncode == 0:
+                print("   ✅ Played successfully")
+            else:
+                print(f"   ⚠️ aplay error: {play_result.stderr.decode()}")
+        else:
+            # Fallback: try mpv or ffplay
             try:
-                result = subprocess.run(
-                    ['mpv', '--no-terminal', '--no-video', temp_path],
-                    timeout=60, capture_output=True
-                )
-                if result.returncode == 0:
-                    played = True
-                    print("   Played with: mpv")
+                subprocess.run(['mpv', '--no-terminal', '--no-video', mp3_path], 
+                             timeout=60, capture_output=True)
+                print("   ✅ Played with mpv")
             except:
-                pass
-        
-        # Method 2: ffplay
-        if not played:
-            try:
-                result = subprocess.run(
-                    ['ffplay', '-nodisp', '-autoexit', '-loglevel', 'quiet', temp_path],
-                    timeout=60, capture_output=True
-                )
-                if result.returncode == 0:
-                    played = True
-                    print("   Played with: ffplay")
-            except:
-                pass
-        
-        # Method 3: aplay with conversion
-        if not played:
-            try:
-                # Convert MP3 to WAV first
-                wav_path = temp_path.replace('.mp3', '.wav')
-                subprocess.run(
-                    ['ffmpeg', '-y', '-i', temp_path, '-ar', '44100', '-ac', '1', wav_path],
-                    timeout=30, capture_output=True
-                )
-                result = subprocess.run(
-                    ['aplay', wav_path],
-                    timeout=60, capture_output=True
-                )
-                if result.returncode == 0:
-                    played = True
-                    print("   Played with: aplay (converted)")
-                os.unlink(wav_path)
-            except:
-                pass
-        
-        # Method 4: pygame
-        if not played:
-            try:
-                import pygame
-                pygame.mixer.init()
-                pygame.mixer.music.load(temp_path)
-                pygame.mixer.music.play()
-                while pygame.mixer.music.get_busy():
-                    time.sleep(0.1)
-                played = True
-                print("   Played with: pygame")
-            except:
-                pass
-        
-        # Method 5: PyAudio with raw PCM (fallback)
-        if not played:
-            try:
-                print("   Trying PyAudio...")
-                # Re-request as PCM
-                audio_gen = elevenlabs_client.text_to_speech.convert(
-                    voice_id=ELEVENLABS_VOICE_ID,
-                    text=text,
-                    model_id=ELEVENLABS_MODEL,
-                    output_format="pcm_22050"
-                )
-                pcm_data = b''.join(audio_gen)
-                
-                play_stream = audio.open(
-                    format=pyaudio.paInt16,
-                    channels=1,
-                    rate=22050,
-                    output=True,
-                    output_device_index=OUTPUT_DEVICE_INDEX
-                )
-                play_stream.write(pcm_data)
-                play_stream.stop_stream()
-                play_stream.close()
-                played = True
-                print("   Played with: PyAudio")
-            except Exception as e:
-                print(f"   PyAudio failed: {e}")
+                try:
+                    subprocess.run(['ffplay', '-nodisp', '-autoexit', mp3_path],
+                                 timeout=60, capture_output=True)
+                    print("   ✅ Played with ffplay")
+                except:
+                    print("   ❌ Could not play audio")
         
         # Cleanup
         try:
-            os.unlink(temp_path)
+            os.unlink(mp3_path)
+            if os.path.exists(wav_path):
+                os.unlink(wav_path)
         except:
             pass
-        
-        if not played:
-            print("❌ Could not play audio with any method!")
-            print("   Install mpv: sudo apt install mpv")
         
         total_time = (time.time() - start_time) * 1000
         print(f"   Total speak time: {total_time:.0f}ms")
         
     except Exception as e:
         print(f"❌ TTS error: {e}")
-        print(f"   Details: {type(e).__name__}: {str(e)}")
 
 # ==============================================================================
 # --- MAIN LOOP ---
@@ -558,7 +474,7 @@ def speak(text):
 def print_metrics():
     """Print performance summary"""
     total = metrics["stt_latency"] + metrics["llm_latency"] + metrics["tts_latency"]
-    print(f"\n📊 Latency: STT {metrics['stt_latency']:.0f}ms + LLM {metrics['llm_latency']:.0f}ms + TTS {metrics['tts_latency']:.0f}ms = {total:.0f}ms total\n")
+    print(f"\n📊 Latency: STT {metrics['stt_latency']:.0f}ms + LLM {metrics['llm_latency']:.0f}ms + TTS {metrics['tts_latency']:.0f}ms = {total:.0f}ms\n")
 
 def main():
     """Main conversation loop"""
@@ -577,8 +493,8 @@ def main():
     
     try:
         while True:
-            # 1. Listen
-            audio_buffer = record_audio()
+            # 1. Listen with VAD
+            audio_buffer = record_audio_vad()
             
             if audio_buffer is None:
                 continue
@@ -603,8 +519,6 @@ def main():
         speak("Goodbye! It was nice talking to you!")
         
     finally:
-        if audio:
-            audio.terminate()
         print("\n🪐 Pluto offline. Goodbye!\n")
 
 # ==============================================================================
