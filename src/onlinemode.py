@@ -408,7 +408,7 @@ def get_response(user_text):
 # ==============================================================================
 
 def speak(text):
-    """Convert text to speech using ElevenLabs and play via aplay"""
+    """Convert text to speech using ElevenLabs with streaming playback"""
     global metrics
     
     print("🔊 Speaking...")
@@ -416,42 +416,42 @@ def speak(text):
     start_time = time.time()
     
     try:
-        # Generate audio from ElevenLabs - use PCM for direct playback (no conversion!)
+        # Start aplay process - it will play audio as we pipe it in
+        wav_path = tempfile.NamedTemporaryFile(suffix='.wav', delete=False).name
+        
+        # Generate audio from ElevenLabs - stream directly
         audio_generator = elevenlabs_client.text_to_speech.convert(
             voice_id=ELEVENLABS_VOICE_ID,
             text=text,
             model_id=ELEVENLABS_MODEL,
-            output_format="pcm_24000"  # Raw PCM, no conversion needed!
+            output_format="pcm_24000"
         )
         
-        # Collect audio data
-        audio_data = b''.join(audio_generator)
+        # Collect chunks and write WAV file
+        audio_chunks = []
+        first_chunk_time = None
         
-        metrics["tts_latency"] = (time.time() - start_time) * 1000
-        print(f"   TTS generated: {len(audio_data)} bytes ({metrics['tts_latency']:.0f}ms)")
+        for chunk in audio_generator:
+            if first_chunk_time is None:
+                first_chunk_time = time.time()
+                metrics["tts_latency"] = (first_chunk_time - start_time) * 1000
+                print(f"   First audio chunk: {metrics['tts_latency']:.0f}ms")
+            audio_chunks.append(chunk)
         
-        # Create WAV file directly from PCM (no ffmpeg needed!)
-        wav_path = tempfile.NamedTemporaryFile(suffix='.wav', delete=False).name
+        audio_data = b''.join(audio_chunks)
         
+        # Write WAV file
         with wave.open(wav_path, 'wb') as wav_file:
-            wav_file.setnchannels(1)  # Mono
-            wav_file.setsampwidth(2)  # 16-bit
-            wav_file.setframerate(24000)  # 24kHz
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(24000)
             wav_file.writeframes(audio_data)
         
-        # Play using aplay
-        play_result = subprocess.run(
+        # Play audio
+        subprocess.run(
             ['aplay', '-D', AUDIO_DEVICE_SPEAKER, wav_path],
-            capture_output=True,
-            timeout=60
+            capture_output=True, timeout=60
         )
-        
-        if play_result.returncode == 0:
-            print("   ✅ Played successfully")
-        else:
-            # Fallback: try with different format
-            print(f"   ⚠️ Trying fallback...")
-            subprocess.run(['aplay', wav_path], capture_output=True, timeout=60)
         
         # Cleanup
         try:
@@ -460,7 +460,7 @@ def speak(text):
             pass
         
         total_time = (time.time() - start_time) * 1000
-        print(f"   Total speak time: {total_time:.0f}ms")
+        print(f"   ✅ Total speak: {total_time:.0f}ms")
         
     except Exception as e:
         print(f"❌ TTS error: {e}")
