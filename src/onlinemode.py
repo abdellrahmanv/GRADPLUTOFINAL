@@ -27,11 +27,11 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 
 # ElevenLabs Voice Settings
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")  # Rachel
-ELEVENLABS_MODEL = "eleven_turbo_v2_5"  # Fastest model
+ELEVENLABS_MODEL = "eleven_flash_v2_5"  # Fastest + cheapest model
 
 # Groq Model Settings
 GROQ_LLM_MODEL = "openai/gpt-oss-120b"      # GPT-OSS 120B
-GROQ_STT_MODEL = "whisper-large-v3-turbo"   # Fastest Whisper
+GROQ_STT_MODEL = "whisper-large-v3-turbo"   # Fast Whisper
 
 # ==============================================================================
 # --- AUDIO SETTINGS (Card 3 - USB PnP Sound Device) ---
@@ -205,7 +205,7 @@ def initialize():
 # --- AUDIO RECORDING (using arecord) ---
 # ==============================================================================
 
-def record_audio_vad(max_duration=10, silence_duration=0.8):
+def record_audio_vad(max_duration=7, silence_duration=0.6):
     """Record audio with Voice Activity Detection"""
     
     print("🎤 Listening... (speak now)")
@@ -299,13 +299,26 @@ def transcribe_audio(audio_buffer):
     start_time = time.time()
     
     try:
-        # Create temp file for Groq API
+        # Create temp file
         with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
             f.write(audio_buffer.read())
-            temp_path = f.name
+            wav_path = f.name
+        
+        # Compress to FLAC for faster upload (smaller file)
+        flac_path = wav_path.replace('.wav', '.flac')
+        compress_result = subprocess.run(
+            ['ffmpeg', '-y', '-i', wav_path, '-ac', '1', '-ar', '16000', flac_path],
+            capture_output=True, timeout=10
+        )
+        
+        # Use compressed file if available, otherwise original
+        if compress_result.returncode == 0 and os.path.exists(flac_path):
+            upload_path = flac_path
+        else:
+            upload_path = wav_path
         
         # Transcribe with Groq Whisper
-        with open(temp_path, 'rb') as audio_file:
+        with open(upload_path, 'rb') as audio_file:
             transcription = groq_client.audio.transcriptions.create(
                 file=audio_file,
                 model=GROQ_STT_MODEL,
@@ -314,7 +327,12 @@ def transcribe_audio(audio_buffer):
             )
         
         # Cleanup
-        os.unlink(temp_path)
+        try:
+            os.unlink(wav_path)
+            if os.path.exists(flac_path):
+                os.unlink(flac_path)
+        except:
+            pass
         
         metrics["stt_latency"] = (time.time() - start_time) * 1000
         
