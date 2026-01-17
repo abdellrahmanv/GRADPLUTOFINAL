@@ -67,14 +67,18 @@ def init_whisper():
     """Initialize faster-whisper model"""
     global whisper_model
     
-    print("🎤 Loading Whisper (tiny, int8)...")
+    # Use 'base' for better accuracy (tiny is too weak)
+    # Options: tiny < base < small < medium (bigger = more accurate but slower)
+    MODEL_SIZE = "base"  
+    
+    print(f"🎤 Loading Whisper ({MODEL_SIZE}, int8)...")
     
     try:
         from faster_whisper import WhisperModel
         
         start = time.time()
         whisper_model = WhisperModel(
-            "tiny",
+            MODEL_SIZE,
             device="cpu",
             compute_type="int8"
         )
