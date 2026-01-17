@@ -35,20 +35,25 @@ MODELS_DIR = PROJECT_ROOT / "models"
 PIPER_BINARY = str(PIPER_DIR / "piper")
 PIPER_MODEL = str(MODELS_DIR / "en_US-lessac-medium.onnx")
 
-# Ollama config
+# Ollama config - use 1.5B for much better responses
 OLLAMA_HOST = "http://localhost:11434"
-OLLAMA_MODEL = "qwen2.5:0.5b-instruct-q2_k"
-MAX_TOKENS = 60
-MAX_HISTORY = 4
+OLLAMA_MODEL = "qwen2.5:1.5b-instruct-q4_K_M"  # Better model, still fast on Pi4
+MAX_TOKENS = 100
+MAX_HISTORY = 6
 
-# VAD settings
-ENERGY_THRESHOLD = 300
-SILENCE_DURATION = 0.8  # seconds
-MIN_PHRASE_DURATION = 0.3
+# VAD settings - tuned for USB mic
+ENERGY_THRESHOLD = 200  # Lower = more sensitive
+SILENCE_DURATION = 0.7  # seconds of silence to end recording
+MIN_PHRASE_DURATION = 0.5  # minimum speech length
 
 # System prompt
-SYSTEM_PROMPT = """You are Pluto, a helpful voice assistant running locally on a Raspberry Pi. 
-Give very brief responses (1-2 sentences max). Be friendly and concise."""
+SYSTEM_PROMPT = """You are Pluto, a smart and friendly voice assistant. You run completely offline on a Raspberry Pi.
+Rules:
+- Keep responses brief (1-3 sentences)
+- Be helpful, warm, and conversational
+- If you don't know something, say so honestly
+- Never use markdown, bullet points, or special formatting
+- Speak naturally like a friend"""
 
 # ==============================================================================
 # --- GLOBALS ---
