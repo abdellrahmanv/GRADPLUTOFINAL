@@ -37,7 +37,7 @@ PIPER_MODEL = str(MODELS_DIR / "en_US-lessac-medium.onnx")
 
 # Ollama config - 0.5B is fastest on Pi4
 OLLAMA_HOST = "http://localhost:11434"
-OLLAMA_MODEL = "qwen2.5:0.5b"  # Smallest, fastest
+OLLAMA_MODEL = "qwen2.5:0.5b-instruct-q2_K"  # Use instruct version
 MAX_TOKENS = 80
 MAX_HISTORY = 4
 
@@ -234,13 +234,13 @@ def initialize():
 def record_audio_vad(max_duration=5, silence_duration=SILENCE_DURATION):
     """Record audio with Voice Activity Detection - max 5 seconds"""
     
-    print("🎤 Listening... (max 5s)")
+    print("🎤 Listening...")
     
     temp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
     temp_path = temp_wav.name
     temp_wav.close()
     
-    # Record with arecord
+    # Just record for fixed duration - simpler and more reliable
     cmd = [
         'arecord',
         '-D', AUDIO_DEVICE_MIC,
@@ -248,70 +248,36 @@ def record_audio_vad(max_duration=5, silence_duration=SILENCE_DURATION):
         '-r', str(MIC_SAMPLE_RATE),
         '-c', str(MIC_CHANNELS),
         '-t', 'wav',
-        '-d', str(max_duration),
+        '-d', '3',  # Fixed 3 seconds
         '-q',
         temp_path
     ]
     
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    
-    # Monitor for voice activity
-    start_time = time.time()
-    speech_detected = False
-    silence_start = None
-    
-    while process.poll() is None:
-        elapsed = time.time() - start_time
-        
-        # Check if file has audio data
-        if os.path.exists(temp_path) and os.path.getsize(temp_path) > 1000:
-            try:
-                with wave.open(temp_path, 'rb') as wf:
-                    frames = wf.readframes(wf.getnframes())
-                    if len(frames) > 0:
-                        audio = np.frombuffer(frames, dtype=np.int16)
-                        
-                        # Get last chunk for energy calculation
-                        chunk_size = MIC_SAMPLE_RATE // 4  # 250ms
-                        if len(audio) > chunk_size:
-                            recent = audio[-chunk_size:]
-                            energy = np.sqrt(np.mean(recent.astype(np.float32) ** 2))
-                            
-                            if energy > ENERGY_THRESHOLD:
-                                if not speech_detected:
-                                    print("   🎙️ Speech detected...")
-                                speech_detected = True
-                                silence_start = None
-                            elif speech_detected:
-                                if silence_start is None:
-                                    silence_start = time.time()
-                                elif time.time() - silence_start > silence_duration:
-                                    # End of speech
-                                    process.terminate()
-                                    break
-            except:
-                pass
-        
-        time.sleep(0.1)
-    
-    process.wait()
-    
-    # Check if we got valid audio
-    if not os.path.exists(temp_path) or os.path.getsize(temp_path) < 1000:
-        try:
-            os.unlink(temp_path)
-        except:
-            pass
+    try:
+        subprocess.run(cmd, timeout=10, capture_output=True)
+    except Exception as e:
+        print(f"   ❌ Recording error: {e}")
         return None
     
-    # Check duration
-    try:
-        with wave.open(temp_path, 'rb') as wf:
-            duration = wf.getnframes() / wf.getframerate()
-            if duration < MIN_PHRASE_DURATION:
-                os.unlink(temp_path)
-                return None
-    except:
+    # Check audio level
+    if os.path.exists(temp_path) and os.path.getsize(temp_path) > 1000:
+        try:
+            with wave.open(temp_path, 'rb') as wf:
+                frames = wf.readframes(wf.getnframes())
+                audio = np.frombuffer(frames, dtype=np.int16)
+                max_level = np.max(np.abs(audio))
+                avg_level = np.mean(np.abs(audio))
+                print(f"   Audio levels: max={max_level}, avg={avg_level:.0f}")
+                
+                # If audio is too quiet, reject it
+                if max_level < 500:
+                    print("   ⚠️  Audio too quiet - speak louder or closer to mic")
+                    os.unlink(temp_path)
+                    return None
+                    
+        except Exception as e:
+            print(f"   ⚠️  Could not check audio: {e}")
+    else:
         return None
     
     return temp_path
