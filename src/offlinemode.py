@@ -67,9 +67,9 @@ def init_whisper():
     """Initialize faster-whisper model"""
     global whisper_model
     
-    # Use 'base' for better accuracy (tiny is too weak)
+    # Use 'small' for best accuracy on Pi4
     # Options: tiny < base < small < medium (bigger = more accurate but slower)
-    MODEL_SIZE = "base"  
+    MODEL_SIZE = "small"  
     
     print(f"🎤 Loading Whisper ({MODEL_SIZE}, int8)...")
     
