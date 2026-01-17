@@ -184,21 +184,7 @@ def initialize():
         print(f"❌ ElevenLabs error: {e}")
         return False
     
-    # Test audio devices
-    print("🎤 Testing audio devices...")
-    
-    # Test speaker with a quick beep
-    try:
-        result = subprocess.run(
-            ['speaker-test', '-D', AUDIO_DEVICE_SPEAKER, '-t', 'sine', '-f', '440', '-l', '1', '-p', '1'],
-            timeout=3,
-            capture_output=True
-        )
-        print("✅ Speaker working")
-    except Exception as e:
-        print(f"⚠️  Speaker test skipped: {e}")
-    
-    print("\n✅ All systems online!\n")
+    print("\n✅ Ready!\n")
     return True
 
 # ==============================================================================
