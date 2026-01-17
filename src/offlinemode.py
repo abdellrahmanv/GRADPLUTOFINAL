@@ -72,9 +72,9 @@ def init_whisper():
     """Initialize faster-whisper model"""
     global whisper_model
     
-    # Use 'small' for best accuracy on Pi4
-    # Options: tiny < base < small < medium (bigger = more accurate but slower)
-    MODEL_SIZE = "small"
+    # Use 'base' - good balance of accuracy vs speed on Pi4
+    # small is too slow (66s!), tiny is inaccurate
+    MODEL_SIZE = "base"
     
     print(f"🎤 Loading Whisper ({MODEL_SIZE}, int8)...")
     print("   (First run downloads ~250MB model - please wait)")
@@ -230,10 +230,10 @@ def initialize():
 # --- AUDIO RECORDING (arecord + VAD) ---
 # ==============================================================================
 
-def record_audio_vad(max_duration=10, silence_duration=SILENCE_DURATION):
-    """Record audio with Voice Activity Detection"""
+def record_audio_vad(max_duration=5, silence_duration=SILENCE_DURATION):
+    """Record audio with Voice Activity Detection - max 5 seconds"""
     
-    print("🎤 Listening... (speak now)")
+    print("🎤 Listening... (max 5s)")
     
     temp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
     temp_path = temp_wav.name
@@ -334,12 +334,16 @@ def transcribe(audio_path):
             sample_rate = wf.getframerate()
             frames = wf.readframes(n_frames)
             duration = n_frames / sample_rate
-            print(f"      Audio: {duration:.1f}s, {len(frames)} bytes")
+            print(f"      Audio: {duration:.1f}s")
         
         audio = np.frombuffer(frames, dtype=np.int16)
         audio_float = audio.astype(np.float32) / 32768.0
         
-        print(f"      Array: {len(audio_float)} samples, max={np.max(np.abs(audio_float)):.3f}")
+        # Limit to 5 seconds max to prevent slow transcription
+        max_samples = 5 * 16000
+        if len(audio_float) > max_samples:
+            print(f"      Trimming to 5s...")
+            audio_float = audio_float[:max_samples]
         
         # Transcribe - use fastest settings
         segments, info = whisper_model.transcribe(
