@@ -141,16 +141,25 @@ def check_piper():
         print(f"   ❌ Piper model not found at: {PIPER_MODEL}")
         return False
     
-    # Warmup
+    # Warmup - output to temp file, not raw
     try:
         start = time.time()
+        wav_path = tempfile.NamedTemporaryFile(suffix='.wav', delete=False).name
+        
         result = subprocess.run(
-            [PIPER_BINARY, "--model", PIPER_MODEL, "--output_raw"],
+            [PIPER_BINARY, "--model", PIPER_MODEL, "--output_file", wav_path],
             input="Hello",
             text=True,
             capture_output=True,
             timeout=10
         )
+        
+        # Cleanup
+        try:
+            os.unlink(wav_path)
+        except:
+            pass
+        
         elapsed = (time.time() - start) * 1000
         print(f"   ✅ Piper ready ({elapsed:.0f}ms)")
         return True
