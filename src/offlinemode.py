@@ -290,9 +290,16 @@ def transcribe(audio_path):
     try:
         # Load audio
         with wave.open(audio_path, 'rb') as wf:
-            frames = wf.readframes(wf.getnframes())
-            audio = np.frombuffer(frames, dtype=np.int16)
-            audio_float = audio.astype(np.float32) / 32768.0
+            n_frames = wf.getnframes()
+            sample_rate = wf.getframerate()
+            frames = wf.readframes(n_frames)
+            duration = n_frames / sample_rate
+            print(f"      Audio: {duration:.1f}s, {len(frames)} bytes")
+        
+        audio = np.frombuffer(frames, dtype=np.int16)
+        audio_float = audio.astype(np.float32) / 32768.0
+        
+        print(f"      Array: {len(audio_float)} samples, max={np.max(np.abs(audio_float)):.3f}")
         
         # Transcribe
         segments, info = whisper_model.transcribe(
@@ -302,17 +309,23 @@ def transcribe(audio_path):
             vad_filter=True
         )
         
-        text = "".join([s.text for s in segments]).strip()
+        # Collect all segments
+        text_parts = []
+        for segment in segments:
+            text_parts.append(segment.text)
+        
+        text = "".join(text_parts).strip()
         
         metrics["stt_latency"] = (time.time() - start_time) * 1000
         
-        if text:
-            print(f"   📝 \"{text}\" ({metrics['stt_latency']:.0f}ms)")
+        print(f"   📝 Result: \"{text}\" ({metrics['stt_latency']:.0f}ms)")
         
-        return text
+        return text if text else None
         
     except Exception as e:
         print(f"   ❌ Transcription error: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 # ==============================================================================
