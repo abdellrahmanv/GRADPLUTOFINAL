@@ -41,8 +41,8 @@ AUDIO_CARD = 3
 AUDIO_DEVICE_MIC = f"hw:{AUDIO_CARD},0"      # Microphone (mono)
 AUDIO_DEVICE_SPEAKER = f"plughw:{AUDIO_CARD},0"  # Speaker (auto-converts to stereo)
 
-# Recording settings (must match your USB mic capabilities)
-MIC_SAMPLE_RATE = 48000
+# Recording settings - optimized for speed
+MIC_SAMPLE_RATE = 16000  # Lower sample rate = smaller file = faster upload
 MIC_CHANNELS = 1
 MIC_FORMAT = "S16_LE"
 
@@ -205,7 +205,7 @@ def initialize():
 # --- AUDIO RECORDING (using arecord) ---
 # ==============================================================================
 
-def record_audio_vad(max_duration=15, silence_duration=1.5):
+def record_audio_vad(max_duration=10, silence_duration=0.8):
     """Record audio with Voice Activity Detection"""
     
     print("🎤 Listening... (speak now)")
@@ -235,7 +235,7 @@ def record_audio_vad(max_duration=15, silence_duration=1.5):
         last_size = 0
         
         while time.time() - start_time < max_duration:
-            time.sleep(0.2)
+            time.sleep(0.1)  # Check more frequently
             
             if os.path.exists(temp_path):
                 current_size = os.path.getsize(temp_path)
@@ -243,7 +243,7 @@ def record_audio_vad(max_duration=15, silence_duration=1.5):
                 last_size = current_size
                 
                 # Simple VAD based on data growth (audio coming in)
-                if growth_rate > 5000:  # Active audio
+                if growth_rate > 2000:  # Lower threshold for faster detection
                     if not speech_started:
                         print("🎙️  Speech detected...")
                         speech_started = True
@@ -251,8 +251,8 @@ def record_audio_vad(max_duration=15, silence_duration=1.5):
                 elif speech_started:
                     silence_count += 1
                     
-                    # End after ~1.5 seconds of silence
-                    if silence_count >= int(silence_duration / 0.2):
+                    # End after silence detected
+                    if silence_count >= int(silence_duration / 0.1):
                         print("   End of speech")
                         break
         
@@ -398,12 +398,12 @@ def speak(text):
     start_time = time.time()
     
     try:
-        # Generate audio from ElevenLabs
+        # Generate audio from ElevenLabs - use PCM for direct playback (no conversion!)
         audio_generator = elevenlabs_client.text_to_speech.convert(
             voice_id=ELEVENLABS_VOICE_ID,
             text=text,
             model_id=ELEVENLABS_MODEL,
-            output_format="mp3_44100_128"
+            output_format="pcm_24000"  # Raw PCM, no conversion needed!
         )
         
         # Collect audio data
@@ -412,52 +412,32 @@ def speak(text):
         metrics["tts_latency"] = (time.time() - start_time) * 1000
         print(f"   TTS generated: {len(audio_data)} bytes ({metrics['tts_latency']:.0f}ms)")
         
-        # Save to temp file
-        with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as f:
-            f.write(audio_data)
-            mp3_path = f.name
+        # Create WAV file directly from PCM (no ffmpeg needed!)
+        wav_path = tempfile.NamedTemporaryFile(suffix='.wav', delete=False).name
         
-        # Convert to WAV and play using aplay
-        wav_path = mp3_path.replace('.mp3', '.wav')
+        with wave.open(wav_path, 'wb') as wav_file:
+            wav_file.setnchannels(1)  # Mono
+            wav_file.setsampwidth(2)  # 16-bit
+            wav_file.setframerate(24000)  # 24kHz
+            wav_file.writeframes(audio_data)
         
-        # Convert MP3 to WAV using ffmpeg
-        convert_result = subprocess.run(
-            ['ffmpeg', '-y', '-i', mp3_path, '-ar', '48000', '-ac', '2', wav_path],
+        # Play using aplay
+        play_result = subprocess.run(
+            ['aplay', '-D', AUDIO_DEVICE_SPEAKER, wav_path],
             capture_output=True,
-            timeout=30
+            timeout=60
         )
         
-        if convert_result.returncode == 0 and os.path.exists(wav_path):
-            # Play using aplay
-            play_result = subprocess.run(
-                ['aplay', '-D', AUDIO_DEVICE_SPEAKER, wav_path],
-                capture_output=True,
-                timeout=60
-            )
-            
-            if play_result.returncode == 0:
-                print("   ✅ Played successfully")
-            else:
-                print(f"   ⚠️ aplay error: {play_result.stderr.decode()}")
+        if play_result.returncode == 0:
+            print("   ✅ Played successfully")
         else:
-            # Fallback: try mpv or ffplay
-            try:
-                subprocess.run(['mpv', '--no-terminal', '--no-video', mp3_path], 
-                             timeout=60, capture_output=True)
-                print("   ✅ Played with mpv")
-            except:
-                try:
-                    subprocess.run(['ffplay', '-nodisp', '-autoexit', mp3_path],
-                                 timeout=60, capture_output=True)
-                    print("   ✅ Played with ffplay")
-                except:
-                    print("   ❌ Could not play audio")
+            # Fallback: try with different format
+            print(f"   ⚠️ Trying fallback...")
+            subprocess.run(['aplay', wav_path], capture_output=True, timeout=60)
         
         # Cleanup
         try:
-            os.unlink(mp3_path)
-            if os.path.exists(wav_path):
-                os.unlink(wav_path)
+            os.unlink(wav_path)
         except:
             pass
         
