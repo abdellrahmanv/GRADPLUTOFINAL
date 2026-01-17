@@ -301,12 +301,13 @@ def transcribe(audio_path):
         
         print(f"      Array: {len(audio_float)} samples, max={np.max(np.abs(audio_float)):.3f}")
         
-        # Transcribe
+        # Transcribe - disable VAD since we already did VAD during recording
         segments, info = whisper_model.transcribe(
             audio_float,
             language="en",
             beam_size=3,
-            vad_filter=True
+            vad_filter=False,  # Disabled - we handle VAD ourselves
+            condition_on_previous_text=False
         )
         
         # Collect all segments
