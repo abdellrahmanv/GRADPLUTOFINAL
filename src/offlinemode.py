@@ -299,18 +299,40 @@ def transcribe(audio_path):
         with wave.open(audio_path, 'rb') as wf:
             n_frames = wf.getnframes()
             sample_rate = wf.getframerate()
+            n_channels = wf.getnchannels()
             frames = wf.readframes(n_frames)
             duration = n_frames / sample_rate
-            print(f"      Audio: {duration:.1f}s")
+            print(f"      Audio: {duration:.1f}s, {sample_rate}Hz, {n_channels}ch")
         
         audio = np.frombuffer(frames, dtype=np.int16)
+        
+        # If stereo, convert to mono
+        if n_channels == 2:
+            audio = audio[::2]  # Take every other sample
+        
         audio_float = audio.astype(np.float32) / 32768.0
         
-        # Limit to 5 seconds max to prevent slow transcription
+        # Resample to 16kHz if needed (Whisper requires 16kHz)
+        if sample_rate != 16000:
+            print(f"      Resampling {sample_rate}Hz -> 16000Hz")
+            # Simple resampling by interpolation
+            duration_sec = len(audio_float) / sample_rate
+            target_samples = int(duration_sec * 16000)
+            indices = np.linspace(0, len(audio_float) - 1, target_samples)
+            audio_float = np.interp(indices, np.arange(len(audio_float)), audio_float).astype(np.float32)
+        
+        # Limit to 5 seconds max
         max_samples = 5 * 16000
         if len(audio_float) > max_samples:
             print(f"      Trimming to 5s...")
             audio_float = audio_float[:max_samples]
+        
+        # Normalize audio
+        max_val = np.max(np.abs(audio_float))
+        if max_val > 0:
+            audio_float = audio_float / max_val * 0.95
+        
+        print(f"      Ready: {len(audio_float)} samples, peak={np.max(np.abs(audio_float)):.2f}")
         
         # Transcribe - use fastest settings
         segments, info = whisper_model.transcribe(
