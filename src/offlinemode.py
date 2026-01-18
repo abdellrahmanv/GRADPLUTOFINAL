@@ -47,13 +47,14 @@ SILENCE_DURATION = 0.7  # seconds of silence to end recording
 MIN_PHRASE_DURATION = 0.5  # minimum speech length
 
 # System prompt
-SYSTEM_PROMPT = """You are Pluto, a smart and friendly voice assistant. You run completely offline on a Raspberry Pi.
+SYSTEM_PROMPT = """You are Pluto, a helpful voice assistant. 
 Rules:
-- Keep responses brief (1-3 sentences)
-- Be helpful, warm, and conversational
-- If you don't know something, say so honestly
-- Never use markdown, bullet points, or special formatting
-- Speak naturally like a friend"""
+- Answer ONLY what the user asked - nothing more
+- Keep responses short (1-2 sentences)
+- Be practical and realistic
+- Don't make up stories or add random information
+- If you don't know, say "I don't know"
+- Never talk about space, planets, or unrelated topics unless asked"""
 
 # ==============================================================================
 # --- GLOBALS ---
@@ -402,8 +403,8 @@ def get_response(user_text):
                 "stream": True,
                 "options": {
                     "num_predict": MAX_TOKENS,
-                    "temperature": 0.7,
-                    "top_p": 0.9,
+                    "temperature": 0.3,  # Low = focused, realistic
+                    "top_p": 0.8,
                     "num_ctx": 512,  # Smaller context for speed
                 }
             },
