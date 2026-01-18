@@ -54,7 +54,7 @@ Rules:
 - Do NOT say hello, hi, or greet in every response - only if the user greets you first
 - Be practical and realistic
 - Don't make up stories or add random information
-- If you don't know, say "I don't know""""
+- If you don't know, just say I don't know"""
 
 # ==============================================================================
 # --- GLOBALS ---
