@@ -57,12 +57,10 @@ Dr. Amgad Byoumy.
 Rules:
 - Answer ONLY what the user asked - nothing more
 - Keep responses short (1-2 sentences)
+- Do NOT say hello/hi/greetings in every response - only greet if user greets you first
 - Be practical, realistic, and professional
 - Don't add random information or go off-topic
-- If you don't know something, say "I'm not sure about that"
-- Stay focused on being a helpful greeting assistant
-
-You are warm and welcoming, but always stay on topic."""
+- If you don't know something, say "I'm not sure about that" """
 
 # ==============================================================================
 # --- IMPORTS ---
