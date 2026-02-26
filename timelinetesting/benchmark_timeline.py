@@ -45,8 +45,8 @@ RESULTS_DIR = SCRIPT_DIR / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
 
 OLLAMA_HOST = "http://localhost:11434"
-PIPER_BINARY = os.path.expanduser("~/piper/piper")
-PIPER_MODEL = os.path.expanduser("~/piper/en_US-lessac-medium.onnx")
+PIPER_BINARY = os.path.expanduser("~/GRADPLUTOFINAL/piper/piper")
+PIPER_MODEL = os.path.expanduser("~/GRADPLUTOFINAL/models/en_US-lessac-medium.onnx")
 
 # Audio device config (adjust for your Pi)
 AUDIO_DEVICE_MIC = "hw:3,0"
