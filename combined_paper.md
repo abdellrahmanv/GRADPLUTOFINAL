@@ -7,7 +7,7 @@
 
 ## Abstract
 
-Deploying deep learning inference on resource-constrained edge devices remains a significant engineering challenge. This paper presents two complementary optimization studies on the Raspberry Pi 4 (quad-core ARM Cortex-A72, 4 GB RAM, no GPU): **(A)** a YOLO-based human detection pipeline optimized from 2 FPS to 20 FPS — a 10× throughput improvement, and **(B)** a fully offline conversational voice assistant optimized from 11-second to 1.4-second end-to-end response time — a 7.6× latency reduction. Both systems share common optimization principles: inference runtime selection, aggressive model quantization (FP16 and INT8), and pipeline-level engineering. We present empirical measurements collected over N=10 repeated trials with mean ± standard deviation, document a failure case in INT8 per-tensor quantization for YOLO multi-head detection outputs, and provide a comparative analysis of speech recognition engines (OpenAI Whisper vs. faster-whisper) demonstrating a 20–40× latency difference attributable to the inference backend, not model architecture. The combined work provides a practical reference for deploying neural network inference on ARM-based single-board computers.
+Deploying deep learning inference on resource-constrained edge devices remains a significant engineering challenge. This paper presents two complementary optimization studies on the Raspberry Pi 4 (quad-core ARM Cortex-A72, 4 GB RAM, no GPU): **(A)** a YOLO-based human detection pipeline optimized from 2 FPS to 20 FPS — a 10× throughput improvement, and **(B)** a fully offline conversational voice assistant integrating speech-to-text (faster-whisper, INT8), a 2-bit quantized language model (Qwen2.5 0.5B), and neural text-to-speech (Piper), formally benchmarked at 15.8 ± 7.9 seconds mean processing latency (N=10 trials) with short conversational queries completing in under 10 seconds. Both systems share common optimization principles: inference runtime selection, aggressive model quantization (FP16 and INT8), and pipeline-level engineering. We present empirical measurements collected over N=10 repeated trials with mean ± standard deviation, document a failure case in INT8 per-tensor quantization for YOLO multi-head detection outputs, and provide per-component latency breakdowns (STT, LLM, TTS) revealing output-length-dependent variance and cold-start effects in on-device LLM inference. The combined work provides a practical reference for deploying neural network inference on ARM-based single-board computers.
 
 **Keywords:** edge AI, Raspberry Pi, YOLO, object detection, voice assistant, model quantization, TFLite, real-time inference
 
@@ -21,14 +21,14 @@ This paper presents two studies developed on the Raspberry Pi 4 Model B (4 GB):
 
 **Part A — Human Detection.** A YOLO-based real-time human detection system was iteratively optimized through seven development phases. Starting from a YOLOv5n model running through PyTorch at approximately 2 FPS, the system was progressively improved through runtime migration (PyTorch → TensorFlow Lite), model quantization, input resolution reduction, and pipeline engineering (threaded capture, frame skipping). A critical failure in INT8 per-tensor quantization — where a single scale factor destroyed objectness scores — was identified, analyzed, and resolved by switching to YOLOv8n with float16 quantization. The final system achieves 20 FPS with 0.899 detection confidence.
 
-**Part B — Voice Assistant.** A fully offline conversational voice assistant was developed through four architectural iterations. The system began as a keyword-matching chatbot with no language model (8–14 second response time), progressed through an over-engineered multi-threaded architecture, and was ultimately rewritten as a streamlined single-file pipeline. The final system uses faster-whisper (CTranslate2, INT8) for speech-to-text, Ollama with Qwen2.5 0.5B (2-bit quantized) for language generation, and Piper for text-to-speech, achieving sub-2-second end-to-end processing with no cloud dependency.
+**Part B — Voice Assistant.** A fully offline conversational voice assistant was developed through four architectural iterations. The system began as a keyword-matching chatbot with no language model (8–14 second response time), progressed through an over-engineered multi-threaded architecture, and was ultimately rewritten as a streamlined single-file pipeline. The final system uses faster-whisper (CTranslate2, INT8) for speech-to-text, Ollama with Qwen2.5 0.5B (2-bit quantized) for language generation, and Piper for text-to-speech — operating entirely offline with no cloud dependency. Formal benchmarking (N=10 trials) measured mean processing latency of 15.8 ± 7.9 seconds, with short conversational queries (≤15-word responses) completing in approximately 9 seconds.
 
 Both projects reveal recurring themes: the dominant impact of runtime and quantization choices over code-level optimization, the cost of architectural complexity on constrained devices, and the importance of systematic measurement at every optimization step.
 
 **Key contributions:**
 1. Empirical measurements of each optimization step on Raspberry Pi 4, reported with mean ± standard deviation over N=10 trials
 2. Analysis of INT8 per-tensor quantization failure for YOLO multi-head detection outputs, with identification of root cause and resolution
-3. Comparative analysis of STT inference backends (PyTorch vs. CTranslate2) demonstrating that the runtime — not model size — accounts for the dominant latency reduction
+3. Formal N=10 benchmark measurements of the complete voice pipeline with per-component latency breakdown (STT, LLM, TTS), revealing output-length-dependent variance and LLM cold-start effects on edge hardware
 4. Practical deployment guidelines for neural network inference on ARM-based single-board computers
 
 ---
@@ -315,9 +315,11 @@ Version 3 introduced a real language model: Ollama [11] running Qwen2.5 0.5B wit
 | TTS latency | 205 ms | 120 ms |
 | **Total processing** | **2,340 ms** | **1,380 ms** |
 
+*Note: V3 latencies are development estimates from informal testing, not formal N=10 benchmarks. Formal benchmarking was conducted only for the final V4 system (see Table 11).*
+
 The optimization phase applied two key changes: (1) replacing the STT engine from OpenAI Whisper (PyTorch runtime) to faster-whisper (CTranslate2 runtime) with INT8 quantization, and (2) increasing LLM quantization aggressiveness from 4-bit to 2-bit.
 
-**Note on STT engine change:** The 4× reduction in STT latency (245 ms → 60 ms) is primarily attributable to the inference runtime change, not model size. OpenAI Whisper uses PyTorch with full FP32 computation on ARM. faster-whisper uses CTranslate2 — a C++ inference engine with INT8 quantization, fused attention operations, and optimized memory access patterns for Transformer models.
+**Note on STT engine change:** The estimated 4× reduction in STT latency (245 ms → 60 ms) for the tiny model during development is attributable to the inference runtime change. OpenAI Whisper uses PyTorch with full FP32 computation on ARM. faster-whisper uses CTranslate2 — a C++ inference engine with INT8 quantization, fused attention operations, and optimized memory access patterns for Transformer models. Note that these tiny-model values are development estimates; the formal N=10 benchmark measured the base model (selected for V4 due to higher accuracy) at 4,423 ± 111 ms on 2–3 second audio clips.
 
 A face detection subsystem (YuNet) was also integrated and subsequently removed after proving architecturally incompatible with the voice pipeline, confirming that scope discipline is critical on resource-constrained platforms.
 
@@ -329,8 +331,8 @@ The final version was rewritten from scratch with three design principles: simpl
 
 | Parameter | V3 | V4 | Rationale |
 |-----------|----|----|-----------|
-| STT engine | OpenAI Whisper (PyTorch) | faster-whisper (CTranslate2) | 20–40× faster runtime |
-| STT model | tiny (39M) | base (74M) | Better accuracy; INT8 keeps it fast |
+| STT engine | OpenAI Whisper (PyTorch) | faster-whisper (CTranslate2) | Optimized C++ runtime with INT8 |
+| STT model | tiny (39M) | base (74M) | Better accuracy; INT8 keeps it feasible |
 | STT compute | FP32 | INT8 | ~2× throughput on ARM |
 | STT beam size | 5 | 1 (greedy) | ~3× decoding speedup |
 | LLM quantization | q4_k_M (4-bit) | q2_K (2-bit) | ~40% faster inference |
@@ -340,15 +342,20 @@ The final version was rewritten from scratch with three design principles: simpl
 | Temperature | 0.7 | 0.3 | Less sampling overhead |
 | Audio I/O | PyAudio | arecord/aplay (ALSA) | More reliable, less overhead |
 
-**Table 11: V4 Final System Latency**
+**Table 11: V4 Final System Latency (Formal Benchmark, N=10 Trials)**
 
-| Stage | Measured Time |
-|-------|-------------|
-| Audio recording (fixed) | 3,000 ms |
-| STT (faster-whisper base, INT8, beam=1) | 60–150 ms |
-| LLM (Qwen2.5 0.5B, q2_K, streaming) | 800–2,000 ms |
-| TTS (Piper) | 100–300 ms |
-| **Total processing (STT + LLM + TTS)** | **960–2,450 ms** |
+| Stage | Mean ± SD (ms) | Range (ms) |
+|-------|---------------|------------|
+| Audio recording (fixed) | 3,000 | — |
+| STT (faster-whisper base, INT8, beam=1) | 4,423 ± 111 | 4,248 – 4,619 |
+| LLM (Qwen2.5 0.5B, q2_K, streaming) | 5,683 ± 4,416 | 1,888 – 15,899 |
+| LLM first token | 2,240 ± 3,526 | 989 – 12,817† |
+| TTS (Piper, en_US-lessac-medium) | 5,713 ± 4,488 | 1,995 – 13,706 |
+| **Total processing (STT + LLM + TTS)** | **15,818 ± 7,940** | **8,355 – 26,860** |
+
+†Trial 1 first-token latency (12,817 ms) reflects Ollama model cold-start (loading weights into RAM). Warm trials 2–10 averaged 1,064 ± 43 ms first-token latency.
+
+**Note on variance:** LLM and TTS latencies are strongly correlated with response length. Short responses (≤15 words, 5 of 10 trials) averaged 8,950 ms total processing; longer responses (>50 words, 4 of 10 trials) averaged 25,441 ms. STT latency is consistent (CV = 2.5%) because input audio length was similar across trials.
 
 ### 5.5 Model Selection Analysis
 
@@ -356,13 +363,15 @@ The final version was rewritten from scratch with three design principles: simpl
 
 **Table 12: Whisper Model Size vs. Latency (faster-whisper, INT8)**
 
-| Model | Parameters | STT Latency | Accuracy | Decision |
+| Model | Parameters | STT Latency† | Accuracy | Decision |
 |-------|-----------|------------|----------|----------|
-| tiny | 39M | ~60 ms | Low (frequent errors) | Too inaccurate |
-| base | 74M | ~150 ms | Acceptable | **Selected** |
-| small | 244M | ~66,000 ms | High | Unusable on Pi |
+| tiny | 39M | ~60 ms‡ | Low (frequent errors) | Too inaccurate |
+| base | 74M | 4,423 ± 111 ms | Acceptable | **Selected** |
+| small | 244M | ~66,000 ms‡ | High | Unusable on Pi |
 
-The `small` model was 440× slower than `tiny`, confirming that model parameter count translates roughly linearly to inference time on ARM CPUs without GPU acceleration.
+†Measured on 2–3 second audio clips (natural-language queries). ‡Development estimates; only `base` was formally benchmarked (N=10).
+
+The `small` model was estimated to be ~1,000× slower than `tiny`, confirming that model parameter count has a super-linear effect on inference time on ARM CPUs without GPU acceleration.
 
 **LLM model selection.**
 
@@ -380,65 +389,70 @@ The `small` model was 440× slower than `tiny`, confirming that model parameter 
 
 | Version | STT Engine | STT (ms) | LLM (ms) | TTS (ms) | Total (ms) |
 |---------|-----------|----------|----------|----------|------------|
-| V1 | Whisper base (PyTorch, FP32) | 3,000–5,000 | 0 (keyword) | 1,000–2,000 | 4,000–7,000* |
-| V2 | Whisper base (PyTorch, FP32) | 3,000–5,000 | 0 (keyword) | 1,000–2,000 | 4,000–7,000* |
-| V3 | Whisper tiny (PyTorch, FP32) | 245 | 1,890 | 205 | 2,340 |
-| V3-opt | faster-whisper tiny (INT8) | 60 | 1,200 | 120 | 1,380 |
-| V4 | faster-whisper base (INT8) | 60–150 | 800–2,000 | 100–300 | 960–2,450 |
+| V1 | Whisper base (PyTorch, FP32) | 3,000–5,000† | 0 (keyword) | 1,000–2,000† | 4,000–7,000† |
+| V2 | Whisper base (PyTorch, FP32) | 3,000–5,000† | 0 (keyword) | 1,000–2,000† | 4,000–7,000† |
+| V3 | Whisper tiny (PyTorch, FP32) | 245† | 1,890† | 205† | 2,340† |
+| V3-opt | faster-whisper tiny (INT8) | 60† | 1,200† | 120† | 1,380† |
+| **V4** | **faster-whisper base (INT8)** | **4,423 ± 111** | **5,683 ± 4,416** | **5,713 ± 4,488** | **15,818 ± 7,940** |
 
-\* V1 total end-to-end (including recording) was 8–14s; processing-only shown here.
+†Development estimates from informal testing; not formally benchmarked with N=10 protocol. V4 row shows formally measured values (N=10 trials, mean ± SD).
 
-**Latency reduction:**
+**Analysis:** V4 measured latency is higher than V3/V3-opt estimates for three reasons: (1) V4 uses the base STT model (74M parameters) instead of tiny (39M) for better accuracy; (2) the formal benchmark used 2–3 second natural-language audio, whereas informal V3 testing used shorter clips; (3) LLM and TTS latencies scale with response length — short responses (≤15 words) averaged 8,950 ms total vs. 25,441 ms for longer responses.
 
-$$\text{Processing improvement (V1} \to \text{V4)} = \frac{5{,}500 \text{ ms (V1 median)}}{1{,}445 \text{ ms (V4 median)}} \approx 3.8\times$$
-
-When including recording time reduction (30s broken VAD → 3s fixed): total end-to-end improvement is approximately 7.6×.
+**Capability progression:** V1/V2 used keyword matching (no language understanding). V4 delivers real conversational AI with a language model, fully offline. The primary achievement is not raw latency reduction but enabling LLM-powered conversation on a \$35 device with no network dependency.
 
 **Figure 5: Voice Assistant Latency Progression Across Versions**
 
 ```mermaid
 xychart-beta
     title "Processing Latency by Version (ms)"
-    x-axis ["V1", "V2", "V3", "V3-opt", "V4"]
-    y-axis "Total Processing Time (ms)" 0 --> 6000
-    bar [5500, 5500, 2340, 1380, 1445]
+    x-axis ["V1†", "V2†", "V3†", "V3-opt†", "V4 (N=10)"]
+    y-axis "Total Processing Time (ms)" 0 --> 18000
+    bar [5500, 5500, 2340, 1380, 15818]
 ```
 
-*V1/V2 are dominated by PyTorch Whisper STT latency (3–5s). V3 introduces an LLM but reduces STT via model downsizing. V3-opt switches to CTranslate2 runtime. V4 uses a larger STT model (base vs. tiny) with INT8 quantization and streaming LLM.*
+*†V1–V3-opt values are development estimates. V4 is the formally measured mean (N=10 trials). V4 includes a real LLM (absent in V1/V2) and uses a larger STT model (base vs. tiny in V3). The higher V4 latency reflects added capability (conversational AI vs. keyword matching), not performance regression. Short V4 queries averaged 8,950 ms.*
 
 **Figure 6: Latency Breakdown by Component (V3 → V4)**
 
 ```mermaid
 xychart-beta
     title "Component Latency Breakdown (ms)"
-    x-axis ["V3 STT", "V3 LLM", "V3 TTS", "V3opt STT", "V3opt LLM", "V3opt TTS", "V4 STT", "V4 LLM", "V4 TTS"]
-    y-axis "Latency (ms)" 0 --> 2000
-    bar [245, 1890, 205, 60, 1200, 120, 105, 1200, 200]
+    x-axis ["V3 STT†", "V3 LLM†", "V3 TTS†", "V3opt STT†", "V3opt LLM†", "V3opt TTS†", "V4 STT", "V4 LLM", "V4 TTS"]
+    y-axis "Latency (ms)" 0 --> 6000
+    bar [245, 1890, 205, 60, 1200, 120, 4423, 5683, 5713]
 ```
 
-*LLM inference dominates total latency in all versions with a language model. STT optimization (PyTorch → CTranslate2) eliminated the STT bottleneck present in V1/V2.*
+*†V3/V3-opt values are development estimates. V4 values are formally measured (N=10, mean). In V4, all three components contribute roughly equally to total latency. LLM and TTS variance is dominated by response length — short queries: ~2.2s LLM + ~2.3s TTS; long queries: ~8.7s LLM + ~10.5s TTS.*
 
 **Figure 7: Contribution of Each Optimization to Latency Reduction (V1 → V4)**
 
 ```mermaid
-pie title Latency Reduction Contribution
-    "STT Engine (PyTorch→CTranslate2)" : 52
-    "LLM Quantization (4-bit→2-bit)" : 20
-    "LLM Config (tokens, context, stream)" : 14
-    "TTS Optimization" : 8
-    "Architecture Simplification" : 6
+pie title V4 Measured Latency Breakdown (N=10)
+    "STT (faster-whisper base INT8)" : 28
+    "LLM generation (Qwen2.5 0.5B q2_K)" : 36
+    "TTS (Piper en_US-lessac-medium)" : 36
 ```
 
-*The STT runtime change accounts for over half of the total improvement, reinforcing the finding that inference backend selection is the dominant optimization lever on edge hardware.*
+*In the formally measured V4 system, latency is distributed roughly equally across all three components, with LLM and TTS together accounting for 72% of processing time. Unlike earlier development estimates that showed STT as dominant, the measured data reveals that response generation (LLM + TTS) is the primary bottleneck.*
 
-> **[PLACEHOLDER]** Formal benchmark results (N=10 trials per version) will be inserted from `benchmark_timeline.py`:
->
-> | Version | STT (ms) | LLM (ms) | TTS (ms) | Total (ms) |
-> |---------|----------|----------|----------|------------|
-> | V1 | ___ ± ___ | — | ___ ± ___ | ___ ± ___ |
-> | V3 | ___ ± ___ | ___ ± ___ | ___ ± ___ | ___ ± ___ |
-> | V3-opt | ___ ± ___ | ___ ± ___ | ___ ± ___ | ___ ± ___ |
-> | V4 | ___ ± ___ | ___ ± ___ | ___ ± ___ | ___ ± ___ |
+**Table 16: V4 Formal Benchmark Results (N=10 Trials)**
+
+| Trial | Query | STT (ms) | LLM (ms) | TTS (ms) | Total (ms) |
+|-------|-------|----------|----------|----------|------------|
+| 1 | "Hello, what is the weather today?" | 4,588 | 15,899 | 4,734 | 25,220 |
+| 2 | "Tell me a fun fact about robots." | 4,619 | 8,312 | 10,854 | 23,785 |
+| 3 | "What time is it?" | 4,329 | 2,158 | 2,103 | 8,590 |
+| 4 | "How does a computer work?" | 4,394 | 8,884 | 12,622 | 25,900 |
+| 5 | "What is your name?" | 4,357 | 2,423 | 2,937 | 9,717 |
+| 6 | "Tell me a short joke." | 4,476 | 2,705 | 2,528 | 9,710 |
+| 7 | "What is artificial intelligence?" | 4,332 | 8,822 | 13,706 | 26,860 |
+| 8 | "How far is the moon?" | 4,411 | 3,715 | 3,538 | 11,664 |
+| 9 | "What is the capital of Egypt?" | 4,472 | 1,888 | 1,995 | 8,355 |
+| 10 | "Say something nice." | 4,248 | 2,022 | 2,110 | 8,380 |
+| **Mean ± SD** | | **4,423 ± 111** | **5,683 ± 4,416** | **5,713 ± 4,488** | **15,818 ± 7,940** |
+
+Notable patterns: (1) STT latency is highly consistent (CV = 2.5%), confirming deterministic transcription performance. (2) LLM and TTS variance is dominated by response length — short factual answers (trials 3, 9, 10) complete in ~8.4s total, while open-ended questions (trials 4, 7) require ~26s. (3) Trial 1 exhibits LLM cold-start: first-token latency of 12,817 ms vs. ~1,050 ms for warm trials.
 
 ---
 
@@ -477,11 +491,13 @@ Across both projects, the largest performance gains came from inference runtime 
 | Change | Speedup | Category |
 |--------|---------|----------|
 | PyTorch → TFLite (detection) | ~4× inference | Runtime |
-| OpenAI Whisper → faster-whisper (voice) | 20–40× STT | Runtime |
+| OpenAI Whisper → faster-whisper (voice) | ~4× STT (tiny model, est.)† | Runtime |
 | 320→224 resolution (detection) | 4.25× inference | Architecture |
 | q4_k_M → q2_K (voice) | ~40% LLM | Quantization |
 | Threaded capture (detection) | ~15% pipeline | Pipeline |
 | Vectorized NumPy (detection) | ~10% post-processing | Code |
+
+†Development estimate for tiny model (245 → 60 ms). The formally benchmarked base model measured 4,423 ms on 2–3s audio.
 
 This ordering suggests that practitioners targeting edge deployment should prioritize runtime selection and quantization strategy before investing in code-level optimization.
 
@@ -530,7 +546,7 @@ This paper presented two complementary optimization studies on the Raspberry Pi 
 
 1. **Human detection** achieved a 10× throughput improvement (2 → 20 FPS) through runtime migration (PyTorch → TFLite), float16 quantization, resolution reduction (320 → 224), and pipeline engineering. A failure case in INT8 per-tensor quantization for YOLO outputs was identified and analyzed.
 
-2. **Voice assistant** achieved a 3.8× processing latency reduction (5.5s → 1.4s) — or 7.6× end-to-end including recording optimization — through inference engine replacement (PyTorch → CTranslate2), aggressive quantization (INT8 STT, 2-bit LLM), and architectural simplification.
+2. **Voice assistant** delivered fully offline conversational AI (STT + LLM + TTS) on the Raspberry Pi 4, formally benchmarked at 15.8 ± 7.9 seconds mean processing latency (N=10 trials), with short conversational queries completing in approximately 9 seconds. The system evolved from keyword matching (V1/V2) to real language model conversation (V4) through inference engine selection (CTranslate2 for STT, llama.cpp via Ollama for LLM), aggressive quantization (INT8 STT, 2-bit LLM), and architectural simplification.
 
 Both studies demonstrate that on ARM-based edge devices the dominant optimization strategy is infrastructure selection — choosing the appropriate inference runtime and quantization level — rather than application-level code optimization.
 
