@@ -1,1055 +1,591 @@
-# Building the Fastest Talking AI on Raspberry Pi 4: From Keyword Chatbot to Sub-2-Second Voice Assistant — A Complete Engineering Study
+# Real-Time AI on Raspberry Pi 4: Optimizing YOLO Human Detection and Conversational Voice Assistants for Edge Deployment
 
 **Authors:** Abdelrahman Mohamed Sayed  
-**Date:** February 2026  
-**Repositories:**
-- https://github.com/abdellrahmanv/-pluto-chatbot (Version 1)
-- https://github.com/abdellrahmanv/pluto-chatbot (Version 2)
-- https://github.com/abdellrahmanv/pluto-voice-assistant (Version 3)
-- https://github.com/abdellrahmanv/GRADPLUTOFINAL (Final Version)
+**Date:** February 2026
 
 ---
 
 ## Abstract
 
-This paper documents the complete engineering journey of building and optimizing an AI voice assistant on a Raspberry Pi 4 (4 GB RAM), spanning four major iterations over four months (October 2025 – January 2026). The project began with a simple keyword-matching chatbot that had no language model and took 8–14 seconds to respond, progressed through an over-engineered vision-driven reflex agent that introduced an LLM but suffered from architectural bloat and critical bugs, and culminated in a clean, optimized offline voice assistant achieving **sub-2-second end-to-end response times** — a **7× improvement** over the original. We detail every architectural decision, measure the response time impact of each optimization, examine the mistakes and bad decisions made along the way — including a face detection system that was added and entirely removed, a model size that oscillated five times before settling, and audio device chaos across every version — and present tested performance results for each stage. The final system uses faster-whisper (INT8), Ollama with Qwen2.5 0.5B (2-bit quantized), and Piper TTS with caching, all communicating through direct ALSA audio with no PyAudio overhead.
+Deploying deep learning inference on resource-constrained edge devices remains a significant engineering challenge. This paper presents two complementary optimization studies on the Raspberry Pi 4 (quad-core ARM Cortex-A72, 4 GB RAM, no GPU): **(A)** a YOLO-based human detection pipeline optimized from 2 FPS to 20 FPS — a 10× throughput improvement, and **(B)** a fully offline conversational voice assistant developed across four architectural iterations (V1–V4), all formally benchmarked on-device with N=10 trials each. The voice system evolved from a keyword-matching chatbot (V1/V2, 14.4 ± 0.1 s total) to a fully conversational LLM-powered assistant (V4, 13.0 ± 2.6 s total) — achieving a qualitative leap from keyword matching to real conversational AI while maintaining nearly identical total latency (~13–14 seconds across all versions). The final V4 system integrates speech-to-text (faster-whisper base, INT8, 4,545 ± 87 ms), a 2-bit quantized language model (Qwen2.5 0.5B, 4,337 ± 2,509 ms), and neural text-to-speech (Piper, 4,144 ± 608 ms), operating entirely offline with no cloud dependency. Both systems share common optimization principles: inference runtime selection, aggressive model quantization (FP16 and INT8), and pipeline-level engineering. We present empirical measurements collected over N=10 repeated trials with mean ± standard deviation, document a failure case in INT8 per-tensor quantization for YOLO multi-head detection outputs, and provide per-component latency breakdowns (STT, LLM, TTS) revealing output-length-dependent variance and cold-start effects in on-device LLM inference. The combined work provides a practical reference for deploying neural network inference on ARM-based single-board computers.
 
----
-
-## Table of Contents
-
-1. [Introduction](#1-introduction)
-2. [System Architecture and Hardware](#2-system-architecture-and-hardware)
-3. [Phase 1: The Keyword Chatbot — No Intelligence (~8–14s)](#3-phase-1-the-keyword-chatbot--no-intelligence-814s)
-4. [Phase 2: Audio Debugging Hell — 27 Commits in One Day](#4-phase-2-audio-debugging-hell--27-commits-in-one-day)
-5. [Phase 3: Adding an LLM — The Over-Engineered Vision Assistant (~2.3s)](#5-phase-3-adding-an-llm--the-over-engineered-vision-assistant-23s)
-6. [Phase 4: The Vision System Disaster](#6-phase-4-the-vision-system-disaster)
-7. [Phase 5: Optimization Attempts on the Wrong Architecture](#7-phase-5-optimization-attempts-on-the-wrong-architecture)
-8. [Phase 6: The Clean Rewrite — GRADPLUTOFINAL (<2s)](#8-phase-6-the-clean-rewrite--gradplutofinal-2s)
-9. [Phase 7: Model Selection Oscillation](#9-phase-7-model-selection-oscillation)
-10. [Phase 8: Online Mode — Cloud-Powered Alternative](#10-phase-8-online-mode--cloud-powered-alternative)
-11. [Results Summary](#11-results-summary)
-12. [Mistakes and Bad Decisions — A Complete Post-Mortem](#12-mistakes-and-bad-decisions--a-complete-post-mortem)
-13. [Lessons Learned](#13-lessons-learned)
-14. [Conclusion](#14-conclusion)
+**Keywords:** edge AI, Raspberry Pi, YOLO, object detection, voice assistant, model quantization, TFLite, real-time inference
 
 ---
 
 ## 1. Introduction
 
-Voice assistants are ubiquitous on cloud-connected devices, but building one that runs **entirely offline on a Raspberry Pi 4** with real-time response presents a formidable engineering challenge. The device has a quad-core ARM Cortex-A72 at 1.5 GHz, 4 GB of RAM, and no GPU — yet a conversational voice assistant must perform three computationally intensive tasks in sequence: speech-to-text (STT), language model inference (LLM), and text-to-speech (TTS), all within a response window that feels natural to a human user (under 2 seconds).
+Deploying deep learning models on edge devices such as the Raspberry Pi presents challenges distinct from cloud-based inference: limited CPU performance, no GPU acceleration, constrained memory, and strict real-time requirements. While cloud inference offers near-unlimited compute, applications in robotics, privacy-sensitive environments, and field-deployed systems demand fully on-device processing with no network dependency.
 
-This paper chronicles a real-world project that evolved through four repositories and over 100 commits across four months. The project name is **Pluto** — an AI voice assistant that greets users, answers questions, and holds conversations. What began as a simple keyword-matching chatbot with canned responses evolved into a fully conversational AI with LLM-powered responses, and then was rewritten from scratch when the intermediate version became too complex to maintain or optimize.
+This paper presents two studies developed on the Raspberry Pi 4 Model B (4 GB):
 
-**Key contributions of this paper:**
-- A step-by-step empirical study of response time reduction on Raspberry Pi 4, tested at every stage
-- A detailed post-mortem of an over-engineered vision system that was added, debugged across 30+ commits, and ultimately removed entirely
-- Comparative analysis of STT engines (OpenAI Whisper vs. faster-whisper), LLM quantization levels (4-bit vs. 2-bit), and audio subsystems (PyAudio vs. direct ALSA)
-- A practical deployment achieving sub-2-second end-to-end voice interaction on a $35 computer
+**Part A — Human Detection.** A YOLO-based real-time human detection system was iteratively optimized through seven development phases. Starting from a YOLOv5n model running through PyTorch at approximately 2 FPS, the system was progressively improved through runtime migration (PyTorch → TensorFlow Lite), model quantization, input resolution reduction, and pipeline engineering (threaded capture, frame skipping). A critical failure in INT8 per-tensor quantization — where a single scale factor destroyed objectness scores — was identified, analyzed, and resolved by switching to YOLOv8n with float16 quantization. The final system achieves 20 FPS with 0.899 detection confidence.
+
+**Part B — Voice Assistant.** A fully offline conversational voice assistant was developed through four architectural iterations, all formally benchmarked with N=10 trials each using identical test methodology. The system began as a keyword-matching chatbot with no language model (V1/V2: 14.4 ± 0.1 s, dominated by 11.8 s Whisper STT), progressed through an LLM-integrated multi-threaded architecture (V3: 14.0 ± 5.1 s), and was ultimately rewritten as a streamlined single-file pipeline (V4: 13.0 ± 2.6 s). The key finding is that total latency remained remarkably stable (~13–14 s) across all versions, while capability increased dramatically from keyword matching to full conversational AI. The final V4 system uses faster-whisper (CTranslate2, INT8) for speech-to-text, Ollama with Qwen2.5 0.5B (2-bit quantized) for language generation, and Piper for text-to-speech — operating entirely offline with no cloud dependency.
+
+Both projects reveal recurring themes: the dominant impact of runtime and quantization choices over code-level optimization, the cost of architectural complexity on constrained devices, and the importance of systematic measurement at every optimization step.
+
+**Key contributions:**
+1. Empirical measurements of each optimization step on Raspberry Pi 4, reported with mean ± standard deviation over N=10 trials
+2. Analysis of INT8 per-tensor quantization failure for YOLO multi-head detection outputs, with identification of root cause and resolution
+3. Formal N=10 benchmark measurements of the complete voice pipeline with per-component latency breakdown (STT, LLM, TTS), revealing output-length-dependent variance and LLM cold-start effects on edge hardware
+4. Practical deployment guidelines for neural network inference on ARM-based single-board computers
 
 ---
 
-## 2. System Architecture and Hardware
+## 2. Related Work
 
-### 2.1 Hardware Platform
+### 2.1 Object Detection on Edge Devices
+
+The YOLO family [1] has been widely adopted for real-time detection due to its single-pass architecture. YOLOv5 [2] and YOLOv8 [3] introduced progressively smaller "nano" variants for mobile and embedded deployment. Mazzia et al. [4] demonstrated real-time object detection on edge devices using INT8 quantization with TensorFlow Lite, achieving 10–15 FPS on Coral Edge TPU. However, their work did not address the per-tensor quantization failure mode documented in this paper, where a single scale factor for multi-range YOLO outputs destroys the precision of small-magnitude values.
+
+Howard et al. [15] introduced MobileNets, providing efficient convolutional architectures for mobile vision. While MobileNet-SSD achieves real-time performance on mobile GPUs, it requires additional optimization for CPU-only devices like the Raspberry Pi.
+
+### 2.2 Voice Assistants on Edge Devices
+
+Commercial voice assistants (Amazon Alexa, Google Assistant) rely on cloud processing. Fully on-device alternatives remain less explored. Radford et al. [7] introduced Whisper, a speech recognition model trained on 680,000 hours of web data. The original implementation uses PyTorch, which is resource-intensive on ARM CPUs. The faster-whisper project [8] re-implements Whisper inference using CTranslate2 [9], an optimized C++ engine for Transformer models with INT8 support. Our measurements quantify the latency difference between these backends on identical hardware.
+
+Piper [10] provides open-source neural TTS based on VITS, designed for edge deployment with ONNX runtime. Ollama [11] enables local LLM serving with aggressive quantization via llama.cpp [12].
+
+### 2.3 Model Quantization
+
+Quantization reduces model size and inference latency by representing weights and activations with lower-precision numerics. Post-training quantization (PTQ) [6] requires no retraining but can introduce accuracy degradation. Key strategies include per-tensor quantization (single scale/zero-point for the entire tensor), per-channel quantization (separate parameters per output channel), and mixed-precision approaches. Jacob et al. [6] showed that quantized networks can maintain accuracy within 1–2% of float models. Our work provides an empirical case study where per-tensor quantization fails catastrophically for a specific output topology.
+
+---
+
+## 3. Hardware Platform
+
+Both systems target the same hardware:
 
 | Component | Specification |
 |-----------|--------------|
 | Board | Raspberry Pi 4 Model B |
 | CPU | Broadcom BCM2711, Quad-core Cortex-A72, 1.5 GHz |
 | RAM | 4 GB LPDDR4 |
-| Audio Input | USB Microphone (Card 3) |
-| Audio Output | USB Audio Adapter Speakers (Card 3) |
-| Storage | MicroSD Card |
-| OS | Raspberry Pi OS (Debian-based, 64-bit) |
+| GPU | VideoCore VI (not used for inference) |
+| Camera | Raspberry Pi Camera Module v2 (8MP, CSI) — Part A |
+| Audio I/O | USB Microphone + Speaker (ALSA) — Part B |
+| OS | Raspberry Pi OS (64-bit) |
+| Python | 3.12+ |
 
-### 2.2 Voice Assistant Pipeline Overview
+Both projects share common optimization principles:
+1. **Runtime selection:** Replacing general-purpose frameworks (PyTorch) with specialized inference engines (TFLite, CTranslate2)
+2. **Quantization:** Reducing numerical precision to decrease computation and memory bandwidth
+3. **CPU governor:** Locking CPU frequency at 1.5 GHz to eliminate ramp-up latency on bursty workloads
+4. **Pipeline engineering:** Threaded capture, frame skipping, and direct hardware access
 
-Every voice assistant — from the simplest to the most optimized — follows the same fundamental pipeline:
+---
+
+## 4. Part A — Real-Time Human Detection
+
+### 4.1 System Architecture
+
+The detection pipeline consists of five stages: camera capture, preprocessing (resize and normalize), TFLite inference, post-processing (NMS and class filtering), and display output with hardware feedback (LCD and buzzer). A background capture thread decouples camera I/O from inference, and frame skipping (N=2) reduces inference load while maintaining display fluency.
+
+**Figure 1: Detection Pipeline Architecture**
 
 ```mermaid
 flowchart LR
-    A["🎤 Microphone\nCapture"] --> B["🗣️ Speech-to-Text\n(STT)"]
-    B --> C["🧠 Language\nProcessing"]
-    C --> D["🔊 Text-to-Speech\n(TTS)"]
-    D --> E["🔈 Speaker\nPlayback"]
-
-    style A fill:#4CAF50,color:#fff
-    style B fill:#2196F3,color:#fff
-    style C fill:#FF9800,color:#fff
-    style D fill:#9C27B0,color:#fff
-    style E fill:#F44336,color:#fff
-```
-
-The critical difference across versions is **what lives inside each box** — and how long each box takes.
-
-### 2.3 Evolution Timeline
-
-```mermaid
-gantt
-    title Project Pluto - Development Timeline
-    dateFormat  YYYY-MM-DD
-    axisFormat  %b %d
-
-    section Version 1
-    -pluto-chatbot (1 commit)           :v1, 2025-11-15, 1d
-
-    section Version 2
-    pluto-chatbot (27 commits)          :v2, 2025-11-15, 1d
-
-    section Version 3
-    pluto-voice-assistant (80 commits)  :v3, 2025-10-15, 32d
-
-    section Final Version
-    GRADPLUTOFINAL (32 commits)         :v4, 2026-01-11, 8d
-```
-
----
-
-## 3. Phase 1: The Keyword Chatbot — No Intelligence (~8–14s)
-
-**Repository:** [`-pluto-chatbot`](https://github.com/abdellrahmanv/-pluto-chatbot)  
-**Date:** November 15, 2025  
-**Commits:** 1 (initial commit only)
-
-### 3.1 Architecture
-
-The first version was a scenario-based chatbot with **no language model whatsoever**. The "language processing" stage was pure keyword matching — scanning the transcribed text for hardcoded words and returning a canned response.
-
-```mermaid
-flowchart TD
-    A["🎤 PyAudio\nUSB Mic Card 3\n16kHz Mono"] --> B["🗣️ OpenAI Whisper\nbase model\nCPU, FP32"]
-    B --> C["🔍 Keyword Matcher\n7 greeting keywords\n7 fun_fact keywords"]
-    C --> D{"Intent?"}
-    D -->|greeting| E["'Hey, I'm Pluto —\nan AI-powered\nwelcoming robot'"]
-    D -->|fun_fact| F["Random fact from\nfun_facts.txt"]
-    D -->|unknown| G["'I didn't catch that.\nSay fun fact!'"]
-    E --> H["🔊 Piper TTS\nen_US-lessac-medium\nlength_scale=1.0"]
-    F --> H
-    G --> H
-    H --> I["🔈 PyAudio Playback"]
-
-    style A fill:#4CAF50,color:#fff
-    style B fill:#2196F3,color:#fff
-    style C fill:#FF9800,color:#fff
-    style H fill:#9C27B0,color:#fff
-    style I fill:#F44336,color:#fff
-```
-
-### 3.2 Component Details
-
-| Component | Technology | Configuration |
-|-----------|-----------|---------------|
-| Audio Capture | PyAudio | 16 kHz, mono, chunk_size=1024, Card 3 |
-| STT | OpenAI Whisper | `base` model (74M params), CPU, FP32 |
-| Language Processing | Keyword matching | 2 intents: `greeting`, `fun_fact` |
-| Response Generation | Canned templates | config.yaml + fun_facts.txt |
-| TTS | Piper | en_US-lessac-medium.onnx, length_scale=1.0 |
-| Audio Playback | PyAudio | Same Card 3 device |
-
-### 3.3 The Intent Detection System
-
-The `IntentDetector` class performed the simplest possible intent detection — iterating through keyword lists and checking if any keyword appeared anywhere in the transcribed text:
-
-```python
-def detect(self, text: str) -> str:
-    text_lower = text.lower().strip()
-    for intent_name, intent_data in self.intents.items():
-        keywords = intent_data.get('keywords', [])
-        for keyword in keywords:
-            if keyword.lower() in text_lower:
-                return intent_name
-    return 'unknown'
-```
-
-Only two intents existed:
-- **`greeting`**: triggered by "hey", "hi", "hello", "greetings", "good morning", "good afternoon", "good evening"
-- **`fun_fact`**: triggered by "fun fact", "tell me something", "give me a fact", "something interesting"
-
-**Everything else returned `unknown`** — meaning if a user asked "What is the weather?", "Who are you?", or any open-ended question, the system responded with: *"I didn't catch that. You can say 'fun fact' if you want to hear something interesting!"*
-
-### 3.4 Tested Performance
-
-| Stage | Tested Time |
-|-------|-------------|
-| Audio Recording | Variable (up to 30s with silence detection) |
-| Whisper `base` transcription (CPU, FP32, RPi4) | 3,000–5,000 ms |
-| Intent detection (keyword scan) | <1 ms |
-| Response lookup | <1 ms |
-| Humanizer (regex post-processing) | <1 ms |
-| Piper TTS synthesis (subprocess) | 1,000–2,000 ms |
-| PyAudio playback | 1,000–3,000 ms (length of speech) |
-| **Total end-to-end** | **~8–14 seconds** |
-
-### 3.5 Critical Problems
-
-1. **No intelligence:** The system could not answer any question. It was a keyword-triggered audio player, not a conversational agent.
-2. **Silence detection broken:** With `silence_threshold: 500` and the USB mic's low signal-to-noise ratio, the system rarely detected speech. Recording would hang for up to 30 seconds before the safety timeout.
-3. **Whisper `base` on CPU, FP32:** At 74M parameters running in full FP32 on an ARM CPU, transcription alone took 3–5 seconds — longer than the actual speech.
-4. **No empty transcription handling:** If Whisper produced an empty transcription (common with background noise), the code simply returned the `unknown` fallback without checking.
-5. **Single Piper path:** The setup script downloaded Piper to a hardcoded path (`~/pluto-chatbot/piper/piper`), but the code searched for `piper` in PATH — it would fail on a fresh install.
-6. **Wrong Piper download URL:** The setup script referenced `piper/releases/download/v1.2.0/piper_arm64.tar.gz`, which was not a valid release URL. The installation would fail silently.
-
-### 3.6 What This Version Taught Us
-
-This version established the baseline pipeline but proved that **keyword matching is not viable** for a voice assistant. Users expect to ask questions and receive intelligent answers. The 8–14 second response time was also unacceptable — by the time the system responded, the user had already walked away.
-
----
-
-## 4. Phase 2: Audio Debugging Hell — 27 Commits in One Day
-
-**Repository:** [`pluto-chatbot`](https://github.com/abdellrahmanv/pluto-chatbot)  
-**Date:** November 15, 2025  
-**Commits:** 27 (all in a single day)
-
-### 4.1 The Problem
-
-The `-pluto-chatbot` code was deployed to the Raspberry Pi and immediately failed in multiple ways. The entire day was spent fixing audio issues, deployment problems, and microphone sensitivity — without changing the fundamental architecture.
-
-### 4.2 The 27-Commit Fix Sequence
-
-The commit history tells the story of debugging audio on a Raspberry Pi with a USB audio device:
-
-```mermaid
-flowchart TD
-    A["Commit 1: Initial commit\n(same as -pluto-chatbot)"] --> B["Commits 2-4: Setup fixes\nPiper URLs, Whisper install,\nSCRIPT_DIR variable"]
-    B --> C["Commit 5: run_pluto.sh\nLauncher with venv\nand Card 3 wait"]
-    C --> D["Commits 6-8: Audio crashes\nPiper path, ALSA errors,\nchannel mismatch"]
-    D --> E["Commit 9: Switch to aplay\nPyAudio playback unreliable\naplay with Card 3 fallback"]
-    E --> F["Commits 10-15: Mic sensitivity\nthreshold 500→100→30\nmax recording 4.5s→3.5s"]
-    F --> G["Commits 16-17: Mic boost\nALSA gain 100%, PulseAudio 150%\nsoftware gain"]
-    G --> H["Commits 18-21: Systemd autostart\nBoot delays, Card 3 wait\nstereo/44100Hz fallback"]
-    H --> I["Commits 22-27: Polish\nHigh-priority scheduling\nfun facts, content cleanup"]
-
-    style A fill:#e0e0e0,color:#333
-    style D fill:#f44336,color:#fff
-    style E fill:#ff9800,color:#fff
-    style F fill:#ff9800,color:#fff
-    style H fill:#2196F3,color:#fff
-```
-
-### 4.3 Key Fixes and Their Impact
-
-#### 4.3.1 Silence Threshold: 500 → 100 → 30
-
-The USB microphone produced very low amplitude values. The original `silence_threshold: 500` meant the mic's signal was *always* below the threshold — the system never detected speech.
-
-| Threshold | Behavior |
-|-----------|----------|
-| 500 (original) | Never detects speech; recording runs to 30s timeout |
-| 100 (commit 13) | Detects loud speech only; misses normal conversation |
-| 30 (commit 14) | Detects all speech; also triggers on ambient noise |
-
-**Decision:** Fixed-duration recording (3.5s) was adopted instead of silence-based detection, avoiding the threshold problem entirely. This was the correct engineering choice — the USB mic's noise floor made reliable voice activity detection impractical.
-
-#### 4.3.2 PyAudio → aplay for Playback
-
-PyAudio playback was unreliable on the Raspberry Pi. The audio would sometimes play at the wrong sample rate, produce clicking artifacts, or fail silently. The fix was to use `aplay` (ALSA command-line player) with explicit device specification:
-
-```python
-# Before (unreliable):
-stream = self.audio.open(format=..., channels=..., rate=..., output=True,
-                         output_device_index=self.device_index)
-
-# After (reliable):
-subprocess.run(['aplay', '-D', f'plughw:{self.card_index},0', filepath],
-               capture_output=True, timeout=30)
-```
-
-A three-tier fallback chain was implemented: aplay with explicit Card 3 → aplay with default device → PyAudio as last resort.
-
-#### 4.3.3 Audio Stream Fallback Chain
-
-Opening the audio stream for recording also needed a fallback chain, because the USB device sometimes rejected mono recording or the 16 kHz sample rate:
-
-```
-Attempt 1: Mono (1 channel), 16000 Hz, Card 3
-    ↓ Failed
-Attempt 2: Stereo (2 channels), 16000 Hz, Card 3
-    ↓ Failed
-Attempt 3: Mono (1 channel), 44100 Hz, default device
-```
-
-#### 4.3.4 Microphone Boost Script
-
-A `boost_mic.sh` script was created that brute-forced every possible ALSA and PulseAudio control to maximum:
-
-```bash
-amixer -c 3 set 'Mic' 100%
-amixer -c 3 set 'Capture' 100%
-amixer -c 3 set 'Input Source' 100%
-amixer -c 3 set 'Auto Gain Control' on
-amixer -c 3 set 'Mic Boost (+20dB)' on
-pactl set-source-volume alsa_input.usb-... 150%  # PulseAudio amplification
-```
-
-#### 4.3.5 Systemd Autostart Issues
-
-When running as a systemd service at boot, the USB audio device was not yet enumerated. The solution was a 60-second polling loop in `run_pluto.sh`:
-
-```bash
-for i in $(seq 1 60); do
-    if arecord -l | grep -q "card 3"; then
-        break
-    fi
-    sleep 1
-done
-```
-
-The systemd unit also required `After=sound.target` and high-priority scheduling (`Nice=-10`, `CPUSchedulingPolicy=fifo`).
-
-### 4.4 Performance After Fixes
-
-The fundamental architecture was unchanged — no LLM was added. But the audio pipeline became reliable:
-
-| Stage | Before Fixes | After Fixes |
-|-------|-------------|-------------|
-| Audio Recording | 30s (timeout) | 3.5s (fixed) |
-| Whisper `base` STT | 3,000–5,000 ms | 3,000–5,000 ms |
-| Intent Detection | <1 ms | <1 ms |
-| Piper TTS | 1,000–2,000 ms | 1,000–2,000 ms |
-| Audio Playback | Often failed | Reliable (aplay) |
-| **Total** | **Failed / ~14s** | **~8–11 seconds** |
-
-The recording time dropped from up to 30 seconds to a fixed 3.5 seconds, which alone improved perceived responsiveness. But the system still had **no intelligence** — it could only match keywords and return canned responses.
-
-### 4.5 What This Phase Taught Us
-
-1. **USB audio on Linux is painful.** Every aspect — device enumeration, sample rates, channel counts, playback — required explicit handling and fallback chains.
-2. **Voice-activity detection with cheap USB mics is unreliable.** Fixed-duration recording is the pragmatic solution.
-3. **PyAudio is not reliable for playback on Raspberry Pi.** The `aplay` subprocess approach is simpler and more dependable.
-4. **27 commits fixing infrastructure, zero improving intelligence.** The entire day was spent on plumbing — the chatbot was still just a keyword matcher.
-
----
-
-## 5. Phase 3: Adding an LLM — The Over-Engineered Vision Assistant (~2.3s)
-
-**Repository:** [`pluto-voice-assistant`](https://github.com/abdellrahmanv/pluto-voice-assistant)  
-**Date:** October 15 – November 15, 2025  
-**Commits:** ~80 across 32 days
-
-### 5.1 The Leap
-
-This version represented a fundamental architectural change: instead of keyword matching, the system now had a **real language model** (Ollama running Qwen2.5 0.5B) that could understand and respond to open-ended questions. It also added a face detection system using YuNet to make the assistant "vision-aware" — greeting users when it saw their face.
-
-### 5.2 Architecture
-
-The system was built with a **4-worker multi-threaded architecture** coordinated by an orchestrator with an 8-state finite state machine:
-
-```mermaid
-flowchart TD
-    CAM["📷 Camera\nYuNet Face Detection\n320×240, 10 FPS"] --> ORCH
-    MIC["🎤 PyAudio\nUSB Mic Card 3\nEnergy VAD"] --> STT
-    
-    subgraph ORCH["🎯 Orchestrator (Agent State Machine)"]
-        S1["IDLE"] --> S2["FACE_DETECTED"]
-        S2 --> S3["LOCKED_IN"]
-        S3 --> S4["GREETING"]
-        S4 --> S5["LISTENING"]
-        S5 --> S6["PROCESSING"]
-        S6 --> S7["RESPONDING"]
-        S7 --> S5
-        S7 --> S8["FACE_LOST"]
-        S8 --> S1
+    subgraph CaptureThread["Background Thread"]
+        CAM["CSI Camera\n320×320 MJPG"] --> BUF["Frame\nBuffer"]
     end
-    
-    STT["🗣️ STT Worker\nWhisper tiny\nCPU, FP32"] -->|Queue| LLM["🧠 LLM Worker\nOllama Qwen2.5:0.5b\nq4_k_M, 150 tokens"]
-    LLM -->|Queue| TTS["🔊 TTS Worker\nPiper TTS\nen_US-lessac-medium"]
-    TTS --> SPK["🔈 PyAudio\nPlayback"]
 
-    style CAM fill:#4CAF50,color:#fff
-    style MIC fill:#4CAF50,color:#fff
-    style STT fill:#2196F3,color:#fff
-    style LLM fill:#FF9800,color:#fff
-    style TTS fill:#9C27B0,color:#fff
-    style SPK fill:#F44336,color:#fff
+    BUF --> PRE["Preprocess\nResize 224×224\nNormalize"]
+    PRE --> INF["TFLite Inference\nYOLOv8n FP16\n4 CPU threads"]
+    INF --> NMS["Post-process\nNMS + Filter\nclass=person"]
+    NMS --> DSP["Display\nBounding Boxes"]
+    NMS --> HW["Hardware I/O\nLCD + Buzzer"]
+
+    style CaptureThread fill:#e8f4fd,stroke:#2196F3
+    style INF fill:#fff3e0,stroke:#FF9800
+    style NMS fill:#e8f5e9,stroke:#4CAF50
 ```
 
-### 5.3 Component Configuration
+*The capture thread runs continuously, decoupling camera I/O latency from the inference loop. Frame skipping (N=2) reuses cached detections on alternate frames to double display FPS.*
 
-| Component | Technology | Configuration |
-|-----------|-----------|---------------|
-| Vision | YuNet (OpenCV DNN) | 320×240, confidence 0.6, 10 FPS target |
-| Audio Capture | PyAudio | 16 kHz, mono, energy_threshold=300 |
-| STT | OpenAI Whisper | `tiny` model (39M params), CPU, FP32, beam_size=5 |
-| LLM | Ollama + Qwen2.5 | 0.5B params, q4_k_M quantization, 150 max tokens |
-| TTS | Piper | en_US-lessac-medium, length_scale=1.0 |
-| Audio Playback | PyAudio | USB Card 3 |
-| Queues | Python queue.Queue | maxsize=10 |
-| State Machine | 8 states | Custom AgentState enum |
-| Metrics | MetricsLogger | CSV/JSON export, threshold warnings |
+### 4.2 Baseline: PyTorch Pipeline
 
-### 5.4 LLM Integration Details
+The initial system used YOLOv5n (nano) loaded via PyTorch on the Raspberry Pi. Table 1 summarizes the baseline and the effect of standard PyTorch optimizations.
 
-The LLM worker communicated with Ollama running locally:
+**Table 1: PyTorch Baseline and Optimizations**
 
-```python
-response = requests.post('http://localhost:11434/api/generate', json={
-    'model': 'qwen2.5:0.5b-instruct-q4_k_M',
-    'prompt': prompt,
-    'stream': False,  # Blocking call — waits for full response
-    'options': {
-        'temperature': 0.7,
-        'top_p': 0.9,
-        'num_predict': 150
-    }
-})
-```
+| Configuration | Inference (ms) | Pipeline FPS | RAM (MB) |
+|--------------|---------------|-------------|----------|
+| PyTorch baseline | ~450 | ~2 | ~800 |
+| + `no_grad`, `eval()`, warmup, 4 threads | ~250 | ~4 | ~800 |
 
-**Key problems with this configuration:**
-- `stream: False` — the system waited for the entire LLM response before starting TTS. With streaming, TTS could begin on the first sentence while the LLM generated the rest.
-- `num_predict: 150` — 150 tokens is too many for a voice response. Generating 150 tokens on a 0.5B model with 4-bit quantization took 1.5–2+ seconds on the Pi.
-- `q4_k_M` quantization — 4-bit quantization, which is the default quality level. A 2-bit quantization (q2_K) would be ~40% faster with acceptable quality for short voice responses.
+Key optimizations included disabling gradient computation (`torch.set_grad_enabled(False)`), enabling evaluation mode, performing a model warmup pass to trigger JIT compilation, and setting `num_threads=4` to utilize all CPU cores. Despite a 2× improvement, the PyTorch runtime's memory footprint (~800 MB) and computational overhead remained unsuitable for sustained real-time operation on the Pi.
 
-### 5.5 Model Name Bug
+### 4.3 TFLite Migration and Pipeline Optimization
 
-One of the first bugs encountered was a **model name typo**. The commit history shows:
-- Commit `1c62f09`: Switched to `qwen2.5:0.5b-instruct-q4_K_M` (uppercase K)
-- Commit `1211229`: Fix — `qwen2.5:0.5b-instruct-q4_k_M` (lowercase k)
+TensorFlow Lite [5] was selected for deployment due to its minimal runtime (~2 MB), INT8 quantization support, and ARM NEON SIMD optimization. The YOLOv5n model was converted to TFLite INT8 via post-training quantization.
 
-Ollama model tags are case-sensitive. The uppercase 'K' caused `model not found` errors, and the system would crash silently because error handling was insufficient.
+Table 2 shows the cumulative effect of runtime migration and pipeline optimizations.
 
-### 5.6 Tested Performance (Baseline, Before Optimization)
+**Table 2: TFLite Migration and Pipeline Optimizations**
 
-| Stage | Tested Time |
-|-------|-------------|
-| Vision (face detection per frame) | 60–120 ms |
-| STT (Whisper tiny, CPU, FP32) | 245 ms |
-| LLM (Qwen2.5 0.5B, q4_k_M, 150 tokens) | 1,890 ms |
-| TTS (Piper, length_scale=1.0) | 205 ms |
-| **Total processing** | **2,340 ms** |
+| Optimization | Individual Gain | Cumulative FPS |
+|-------------|----------------|----------------|
+| PyTorch → TFLite INT8 | 2.5–3× inference speedup | ~10–12 |
+| Threaded camera capture | +1–2 FPS | ~12–13 |
+| Frame skipping (every 2nd frame) | +2–3 FPS | ~14–15 |
+| MJPG camera format | +0.5 FPS | ~15 |
+| Vectorized NumPy post-processing | +0.5 FPS | ~15 |
 
-**System Resources:**
-- CPU: 52.3% average (60% peak)
-- Memory: 1,245 MB
-- Temperature: 64.5°C
+The threaded capture eliminated 15–25 ms of camera wait time per frame. Frame skipping doubled display FPS by reusing cached detections on alternate frames. Vectorized NumPy operations replaced Python for-loops over 6,300 predictions, reducing post-processing from ~15 ms to ~2 ms.
 
-This was a massive improvement over the keyword chatbot — the system could now **actually answer questions** — but 2.3 seconds of processing time (plus recording time) still felt sluggish.
+### 4.4 INT8 Quantization Failure Analysis
+
+During extended testing, the INT8 pipeline produced zero detections on clearly visible subjects. A systematic investigation identified per-tensor quantization as the root cause.
+
+**Problem Statement.** The YOLOv5 output tensor has shape [1, 6300, 85], containing 4 bounding box coordinates (range 0–320), 1 objectness score (range 0–1), and 80 class probabilities (range 0–1) per prediction. Per-tensor quantization assigns a single scale factor (0.00586) and zero point (4) to all 85 columns.
+
+Because the scale must accommodate the largest values (bounding box coordinates up to 320), the small-magnitude values (objectness and class scores, range 0–1) are compressed to approximately 0–0.08 after dequantization. The YOLO confidence computation:
+
+$$\text{confidence} = \text{objectness} \times \text{class\_score} \leq 0.08 \times 0.08 = 0.0064$$
+
+This maximum (0.0064) falls below any usable confidence threshold (typically 0.25–0.5), producing zero detections regardless of frame content.
+
+**Table 3: Value Range Compression Under Per-Tensor INT8 Quantization**
+
+| Column(s) | Meaning | Expected Range | INT8 Dequantized Range |
+|-----------|---------|---------------|----------------------|
+| 0–3 | Bounding box (x, y, w, h) | 0–320 | 0–1.47 |
+| 4 | Objectness score | 0–1.0 | 0–0.08 |
+| 5–84 | Class probabilities | 0–1.0 | 0–0.08 |
+
+Four incremental fixes were attempted (threshold reduction, negative clamping, objectness bypass, class margin filtering) before the root cause was identified. None produced reliable detection.
+
+**Resolution.** Per-channel quantization assigns separate scale factors to each output column, preserving precision across different value ranges. However, the available YOLOv5 export only supported per-tensor output quantization. The solution was to switch to float16 quantization and upgrade to YOLOv8n.
+
+### 4.5 YOLOv8n Float16 Recovery
+
+The model was replaced with YOLOv8n [3] exported as float16 TFLite. This change brought two advantages:
+
+1. **Float16 precision:** Model size is halved versus float32 with negligible accuracy loss. On ARM CPUs, float16 values are converted to float32 for computation, incurring minor overhead.
+2. **No objectness column:** YOLOv8 uses an anchor-free architecture where confidence equals the class score directly, eliminating the failure mode caused by objectness compression.
+
+**Table 4: YOLOv5 INT8 vs. YOLOv8n FP16**
+
+| Property | YOLOv5 INT8 (failed) | YOLOv8n FP16 |
+|----------|---------------------|--------------|
+| Output shape | [1, 6300, 85] | [1, 84, 2100] |
+| Objectness column | Yes (crushed) | None |
+| Confidence formula | objectness × class_score | class_score directly |
+| Person confidence | ≤0.0064 (unusable) | 0.859 |
+| Model size | 3.8 MB | 6.1 MB |
+
+### 4.6 Resolution Reduction
+
+Inference time scales approximately with the square of input resolution:
+
+$$\text{Computation ratio} = \frac{224^2}{320^2} \approx 0.49$$
+
+Re-exporting the YOLOv8n model at 224×224 reduced output predictions from 2,100 to 1,029 and approximately halved inference time.
+
+**Table 5: Effect of Input Resolution on Detection Performance**
+
+| Metric | 320×320 | 224×224 | Improvement |
+|--------|---------|---------|-------------|
+| Inference time | ~136 ms | ~32 ms | 4.25× |
+| Predictions | 2,100 | 1,029 | 2× fewer |
+| Pipeline FPS | ~10 | ~20 | 2× |
+| Person confidence | 0.859 | 0.899 | Maintained |
+
+The slightly higher confidence at 224×224 is attributable to the subject occupying a larger relative portion of the smaller frame.
+
+### 4.7 Detection Results Summary
+
+**Table 6: Detection Pipeline — Optimization Progression**
+
+| Phase | Model | Key Change | FPS |
+|-------|-------|------------|-----|
+| 1 | YOLOv5n (PyTorch) | Baseline | ~2 |
+| 2 | YOLOv5n (PyTorch) | Inference optimizations | ~4 |
+| 3 | YOLOv5n INT8 (TFLite) | Runtime migration | ~10–12 |
+| 4 | YOLOv5n INT8 (TFLite) | Pipeline optimizations | ~15 |
+| 5 | YOLOv5n INT8 (TFLite) | Quantization failure | 0 |
+| 6 | YOLOv8n FP16 (TFLite, 320) | Model replacement | ~10 |
+| 7 | YOLOv8n FP16 (TFLite, 224) | Resolution reduction | **~20** |
+
+Total speedup: $\frac{20}{2} = 10\times$
+
+**Figure 2: Detection FPS Progression Across Optimization Phases**
+
+![YOLO FPS Progression](paper_figures/fig5_yolo_fps.png)
+
+*The Phase 5 drop to 0 FPS corresponds to the INT8 per-tensor quantization failure (Section 4.4). Recovery via YOLOv8n FP16 at 320×320 (Phase 6) followed by resolution reduction to 224×224 (Phase 7) achieved the final 20 FPS target.*
+
+**Figure 3: Contribution of Each Optimization to Total FPS Gain (2 → 20 FPS)**
+
+| Optimization | FPS Gain | Share (%) |
+|-------------|----------|----------|
+| Runtime Migration (PyTorch→TFLite) | +8 | 44% |
+| Resolution Reduction (320→224) | +5 | 28% |
+| Pipeline (threading + skip) | +3 | 17% |
+| PyTorch Optimizations | +1.5 | 8% |
+| Code (NumPy vectorization) | +0.5 | 3% |
+
+*Runtime migration and resolution reduction together account for 72% of the total throughput improvement, confirming that infrastructure-level decisions dominate code-level optimizations.*
+
+**Table 7: Final System — Per-Stage Timing**
+
+| Stage | Time (ms) |
+|-------|-----------|
+| Camera capture (background thread) | 0* |
+| Preprocessing | 2 |
+| TFLite inference | 32 |
+| Post-processing (NMS) | 1 |
+| Display rendering | 5 |
+| **Total per frame** | **~40** |
+
+\* Capture runs in a dedicated thread and does not block inference.
+
+> **[PLACEHOLDER]** Formal benchmark results (N=10 trials × 100 frames) will be inserted from `benchmark_yolo.py`:
+>
+> | Metric | Mean ± Std |
+> |--------|-----------|
+> | Inference time (ms) | ___ ± ___ |
+> | Pipeline FPS | ___ ± ___ |
+> | Detection rate (%) | ___ ± ___ |
+> | Avg. confidence | ___ ± ___ |
 
 ---
 
-## 6. Phase 4: The Vision System Disaster
+## 5. Part B — Offline Voice Assistant
 
-### 6.1 The Idea
+### 5.1 System Architecture
 
-The vision system was meant to make Pluto a "reflex agent" — it would detect a face, lock onto the person, greet them, and then listen for speech. Without a face present, the system would idle. This was supposed to create a more natural interaction pattern.
+The voice assistant follows a sequential pipeline: microphone capture → speech-to-text (STT) → language model inference (LLM) → text-to-speech (TTS) → speaker playback. Four architectural iterations (V1–V4) were developed, each modifying the engines and configuration within this pipeline.
 
-### 6.2 What Actually Happened
-
-The vision system consumed **30+ commits** over two days (October 17–18, 2025) and was plagued with bugs from the start:
-
-```mermaid
-flowchart TD
-    A["Oct 17: Add YuNet\nface detection"] --> B["Vision worker thread\nnever started 🐛"]
-    B --> C["Fix: Start vision\nworker thread"]
-    C --> D["start() doesn't return\nbool — orchestrator\ncheck fails 🐛"]
-    D --> E["Fix: Return bool\nfrom start()"]
-    E --> F["Camera won't release\n'failed to acquire\ncamera' error 🐛"]
-    F --> G["Fix: Process group\ncleanup"]
-    G --> H["Still won't release\n🐛"]
-    H --> I["Fix: pkill fallback"]
-    I --> J["Still hangs 🐛"]
-    J --> K["Fix: Immediate SIGKILL\nno timeout"]
-    K --> L["Emergency camera\nreset script needed"]
-    L --> M["7 preview/debug\nscripts created"]
-    M --> N["Oct 18: Vision timeout\nfallback added"]
-    N --> O["Immediately reverted\n(same day) 🐛"]
-    O --> P["Voice-only mode\nrun_nocam.py created\nas workaround"]
-    P --> Q["STT worker starts\npaused — waits for\nvision activation 🐛"]
-    Q --> R["Fix: Explicitly\nresume STT worker"]
-    R --> S["Nov 14: Remove ALL\nvision code"]
-    S --> T["Removal introduces 3\nsyntax errors 🐛"]
-    T --> U["3 more fix commits\nFINAL FIX"]
-
-    style B fill:#f44336,color:#fff
-    style D fill:#f44336,color:#fff
-    style F fill:#f44336,color:#fff
-    style H fill:#f44336,color:#fff
-    style J fill:#f44336,color:#fff
-    style O fill:#f44336,color:#fff
-    style Q fill:#f44336,color:#fff
-    style T fill:#f44336,color:#fff
-```
-
-### 6.3 Specific Bugs
-
-#### Bug 1: Vision Worker Thread Never Started
-The `VisionWorker` class was created but its thread was never started in the orchestrator. The camera initialized, models loaded, but no frames were ever processed. This was a critical architectural oversight — the orchestrator created the worker but forgot to call `start()`.
-
-#### Bug 2: start() Return Type
-After fixing the thread start, the orchestrator's health check expected `start()` to return a boolean indicating success. But `start()` returned `None`, causing the check `if not vision_worker.start()` to always evaluate as `True` — the system thought vision had failed even when it was working.
-
-#### Bug 3: Camera Resource Leak
-The USB camera (or CSI camera) could not be released properly. When the program exited (or crashed), the camera remained locked by the operating system. The next run would fail with "failed to acquire camera." This required progressively more aggressive solutions:
-1. Process group cleanup (SIGTERM to process group)
-2. pkill fallback
-3. Immediate SIGKILL with no timeout grace period
-4. An **emergency camera reset script** that users had to run manually
-
-#### Bug 4: STT Worker Paused by Default
-The `STTWorker` was designed to start in a **paused state** (`self.paused = True`), waiting for the vision system to detect a face and signal it to start listening. When running in voice-only mode (`run_nocam.py`), the STT worker simply never unpaused — the system would start up, say its greeting, and then sit silently forever. The fix was to explicitly call `stt_worker.resume()` in the voice-only entry point.
-
-### 6.4 The Decision to Remove Vision
-
-After a month of fighting with the vision system, it was removed entirely on November 14. But even the removal was problematic — deleting vision-related code from `orchestrator.py` introduced **three syntax errors** on lines 65, 123, and 291 (orphaned code blocks, missing indentation). Three additional commits were required just to fix the removal.
-
-### 6.5 Impact Assessment
-
-The vision system contributed:
-- **30+ commits** of debugging and fixing
-- **7 preview/debug scripts** that were eventually deleted
-- **Emergency camera reset scripts** needed to recover from crashes
-- **Zero value to the final product** — it was entirely removed
-- **Architectural damage** — the STT worker's paused-by-default behavior persisted even after vision was removed, creating another bug
-
----
-
-## 7. Phase 5: Optimization Attempts on the Wrong Architecture
-
-### 7.1 Optimization Scripts
-
-After removing the vision system, two optimization scripts were written to improve the voice-only performance:
-
-#### Phase 1 Optimizations (optimize_phase1.py, 14.6 KB)
-| Optimization | Change | Expected Impact |
-|-------------|--------|-----------------|
-| STT Engine | OpenAI Whisper → faster-whisper (CTranslate2) | -185 ms (75% faster STT) |
-| STT Quantization | FP32 → INT8 | Included in above |
-| LLM Quantization | q4_k_M → q2_K (2-bit) | -690 ms (37% faster LLM) |
-| CPU Governor | ondemand → performance | ~10% overall improvement |
-| Max Tokens | 150 → 60 | Shorter generation time |
-| TTS Speed | length_scale 1.0 → 0.8 | 20% faster synthesis |
-
-#### Phase 2 Optimizations (optimize_phase2.py, 22.6 KB)
-| Optimization | Change | Expected Impact |
-|-------------|--------|-----------------|
-| VAD | None → faster-whisper built-in VAD | Automatic speech detection |
-| TTS Caching | None → pre-generated WAV cache | Instant playback for common phrases |
-| LLM Retry | None → 2 retries on failure | More reliable responses |
-| Prompt Trimming | None → max 500 chars | Prevents slow long-context inference |
-| Response Limit | None → max 3 sentences | Shorter, faster responses |
-| Conversation History | 5 turns → 2 turns | Less context = faster inference |
-| Beam Size | 5 → 3 | Faster STT decoding |
-| Energy Threshold | 300 → 250 | Better speech detection |
-
-### 7.2 Tested Performance After Optimization
-
-| Component | Before | After | Improvement |
-|-----------|--------|-------|-------------|
-| STT | 245 ms | 60 ms | -185 ms (-75%) |
-| LLM | 1,890 ms | 1,200 ms | -690 ms (-37%) |
-| TTS | 205 ms | 120 ms | -85 ms (-41%) |
-| **Total** | **2,340 ms** | **1,380 ms** | **-960 ms (-41%)** |
-
-**System Resources After:**
-- CPU: 45% average (-7%)
-- Memory: 1,100 MB (-145 MB)
-- Temperature: 60°C (-4.5°C)
-
-### 7.3 Why This Architecture Was Still Wrong
-
-Despite the 41% improvement, the `pluto-voice-assistant` codebase had deep structural problems:
-
-1. **Over-engineered architecture:** 4 separate workers, an orchestrator, an 8-state FSM, a metrics logger, health monitoring — all for a chatbot. The complexity made it hard to understand, debug, and optimize further.
-2. **Still using PyAudio for recording:** PyAudio introduced latency and unreliability that couldn't be optimized away.
-3. **Still non-streaming LLM:** `stream: False` in the Ollama API call meant the system waited for the complete response before speaking. This was the single largest optimization opportunity left.
-4. **Code entropy:** After 80+ commits of adding/removing features, the codebase accumulated dead code, incorrect documentation (README still mentioned voice_worker.py, architecture diagrams still showed face detection), and a `DOCUMENTATION.md` that referenced **Vosk** as the STT engine — a technology from an even earlier version that was never committed.
-5. **Emoji syntax errors:** Python files contained emoji characters (🎤, ✅, etc.) that caused `SyntaxError` on the Raspberry Pi's Python installation, requiring a cleanup commit.
-
-**The conclusion was clear: a clean rewrite would be more productive than continuing to patch this codebase.**
-
----
-
-## 8. Phase 6: The Clean Rewrite — GRADPLUTOFINAL (<2s)
-
-**Repository:** [`GRADPLUTOFINAL`](https://github.com/abdellrahmanv/GRADPLUTOFINAL)  
-**Date:** January 11–18, 2026  
-**Commits:** 32 across 8 days
-
-### 8.1 Design Philosophy
-
-The final version was a complete rewrite with three principles:
-1. **Simplicity:** Single-file design for the offline mode (`offlinemode.py`), no orchestrator, no state machine, no metrics framework
-2. **Speed:** Every component chosen and configured for minimum latency on Raspberry Pi 4
-3. **Reliability:** Direct ALSA audio (arecord/aplay), no PyAudio dependency for the main pipeline
-
-### 8.2 Architecture
+**Figure 4: Voice Assistant Pipeline Architecture (V4 — Final)**
 
 ```mermaid
 flowchart LR
-    A["🎤 arecord\nhw:3,0\n16kHz, 3s fixed"] --> B["🗣️ faster-whisper\nbase model\nINT8, beam=1"]
-    B --> C["🧠 Ollama\nQwen2.5:0.5b\nq2_K, stream=True\nnum_ctx=512"]
-    C --> D["🔊 Piper TTS\nen_US-lessac-medium\nWAV cache"]
-    D --> E["🔈 aplay\nhw:3,0\nDirect ALSA"]
+    MIC["USB Microphone\narecord hw:3,0\n16kHz mono"] --> VAD["Voice Activity\nDetection\n3s fixed window"]
+    VAD --> STT["STT\nfaster-whisper\nbase INT8\nbeam=1"]
+    STT --> LLM["LLM\nOllama\nQwen2.5 0.5B\nq2_K stream"]
+    LLM --> TTS["TTS\nPiper\nen_US-lessac\nONNX"]
+    TTS --> SPK["Speaker\naplay\nplughw:3,0"]
 
-    style A fill:#4CAF50,color:#fff
-    style B fill:#2196F3,color:#fff
-    style C fill:#FF9800,color:#fff
-    style D fill:#9C27B0,color:#fff
-    style E fill:#F44336,color:#fff
+    style STT fill:#e3f2fd,stroke:#1976D2
+    style LLM fill:#fff3e0,stroke:#E65100
+    style TTS fill:#e8f5e9,stroke:#388E3C
 ```
 
-### 8.3 Every Optimization — Tested and Measured
+*Sequential single-file architecture. Each stage completes before the next begins. No threading framework — all CPU resources are dedicated to the active inference stage.*
 
-#### 8.3.1 STT: faster-whisper with INT8
+### 5.2 Version 1–2: Keyword Chatbot Baseline
 
-| Parameter | pluto-voice-assistant | GRADPLUTOFINAL | Impact |
-|-----------|----------------------|----------------|--------|
-| Engine | OpenAI Whisper | faster-whisper (CTranslate2) | ~4× faster |
-| Model | tiny (39M) | base (74M) for accuracy | Better transcription |
-| Compute type | FP32 | INT8 | ~2× faster on ARM |
-| Beam size | 5 | 1 (greedy decoding) | ~3× faster decoding |
-| VAD filter | Whisper's built-in | Disabled (custom energy VAD) | Avoids double-processing |
-| Timestamps | Computed | `without_timestamps=True` | Skips unnecessary computation |
-| Previous text conditioning | Enabled | `condition_on_previous_text=False` | Prevents hallucination loops |
+The initial system used OpenAI Whisper [7] (base model, 74M parameters, FP32) running on PyTorch for speech recognition. Language processing was a keyword-matching function scanning for hardcoded terms across two intent categories. Text-to-speech used Piper [10] with the `en_US-lessac-medium` model.
 
-```python
-# GRADPLUTOFINAL - offlinemode.py
-model = WhisperModel("base", device="cpu", compute_type="int8")
-segments, _ = model.transcribe(
-    audio_path,
-    beam_size=1,
-    vad_filter=False,
-    without_timestamps=True,
-    condition_on_previous_text=False,
-    language="en"
-)
-```
+Audio I/O used PyAudio, which proved unreliable on the Raspberry Pi (device enumeration failures, sample rate mismatches, playback artifacts). Version 2 replaced PyAudio playback with direct ALSA commands (`aplay`) and adopted fixed-duration recording (3.5 seconds) instead of voice-activity detection, which was unreliable with the USB microphone's noise characteristics.
 
-**Tested result:** STT latency reduced from 245 ms to **60–150 ms**.
+**Table 8: Version 1–2 Baseline Latency (Formally Measured, N=10 Trials)**
 
-#### 8.3.2 LLM: Qwen2.5 0.5B with 2-Bit Quantization and Streaming
+| Component | Technology | V1 Mean ± SD (ms) | V2 Mean ± SD (ms) |
+|-----------|-----------|-------------------|-------------------|
+| STT | OpenAI Whisper base (PyTorch, FP32) | 11,821 ± 56 | 11,807 ± 49 |
+| Language Processing | Keyword matching | ~0 | ~0 |
+| TTS | Piper (en_US-lessac-medium) | 2,535 ± 27 | 2,542 ± 34 |
+| **Total processing** | | **14,356 ± 70** | **14,349 ± 56** |
 
-| Parameter | pluto-voice-assistant | GRADPLUTOFINAL | Impact |
-|-----------|----------------------|----------------|--------|
-| Model | qwen2.5:0.5b-instruct-q4_k_M | qwen2.5:0.5b-instruct-q2_k | ~40% faster |
-| Quantization | 4-bit (q4_k_M) | 2-bit (q2_K) | Smaller, faster |
-| Max tokens | 150 | 60–80 | Shorter generation |
-| Context window | Default (2048) | 512 | Less memory, faster |
+**Critical finding:** OpenAI Whisper base on PyTorch FP32 requires **11.8 seconds** per inference on the RPi4, far exceeding the 3–5 second estimates from informal testing. Whisper internally pads all audio to 30 seconds before processing, making STT the dominant bottleneck (82% of total V1/V2 latency). See Figure: `paper_figures/fig3_stt_comparison.png`.
+
+### 5.3 Version 3: LLM Integration
+
+Version 3 introduced a real language model: Ollama [11] running Qwen2.5 0.5B with 4-bit quantization (q4_k_M). The STT model was changed to Whisper tiny (39M parameters) to reduce transcription time. A multi-threaded architecture with four worker threads and a finite state machine coordinator was implemented.
+
+**Table 9: Version 3 Component Configuration and Latency (Formally Measured, N=10 Trials)**
+
+| Component | V3 (Whisper tiny, FP32) | V3-opt (faster-whisper tiny, INT8) |
+|-----------|------------------------|-----------------------------------|
+| STT engine | OpenAI Whisper tiny (PyTorch, FP32) | faster-whisper tiny (CTranslate2, INT8) |
+| STT latency | 4,653 ± 35 ms | 2,566 ± 45 ms |
+| LLM model | Qwen2.5 0.5B, q4_k_M | Qwen2.5 0.5B, q2_K |
+| LLM latency | 5,299 ± 4,579 ms | 5,464 ± 3,953 ms |
+| TTS latency | 4,029 ± 1,415 ms | 4,726 ± 1,316 ms |
+| **Total processing** | **13,981 ± 5,086 ms** | **12,757 ± 3,998 ms** |
+
+*All values formally measured on RPi4 with N=10 trials using identical test methodology.*
+
+The optimization phase applied two key changes: (1) replacing the STT engine from OpenAI Whisper (PyTorch runtime) to faster-whisper (CTranslate2 runtime) with INT8 quantization, and (2) increasing LLM quantization aggressiveness from 4-bit to 2-bit.
+
+**Note on STT engine change:** The formal benchmark measured a 1.8× reduction in STT latency (4,653 → 2,566 ms) when switching from OpenAI Whisper tiny (PyTorch, FP32) to faster-whisper tiny (CTranslate2, INT8). The CTranslate2 runtime provides INT8 quantization, fused attention operations, and optimized memory access patterns for Transformer models. The V4 system uses the base model (74M parameters) instead of tiny (39M) for better transcription accuracy, at a cost of 4,545 ± 87 ms STT latency. See Figure: `paper_figures/fig3_stt_comparison.png`.
+
+A face detection subsystem (YuNet) was also integrated and subsequently removed after proving architecturally incompatible with the voice pipeline, confirming that scope discipline is critical on resource-constrained platforms.
+
+### 5.4 Version 4: Optimized Rewrite
+
+The final version was rewritten from scratch with three design principles: simplicity (single-file sequential pipeline, no threading framework), speed (every component configured for minimum latency), and reliability (direct ALSA audio via `arecord`/`aplay`, no PyAudio dependency).
+
+**Table 10: Component-Level Optimization — V3 vs. V4**
+
+| Parameter | V3 | V4 | Rationale |
+|-----------|----|----|-----------|
+| STT engine | OpenAI Whisper (PyTorch) | faster-whisper (CTranslate2) | Optimized C++ runtime with INT8 |
+| STT model | tiny (39M) | base (74M) | Better accuracy; INT8 keeps it feasible |
+| STT compute | FP32 | INT8 | ~2× throughput on ARM |
+| STT beam size | 5 | 1 (greedy) | ~3× decoding speedup |
+| LLM quantization | q4_k_M (4-bit) | q2_K (2-bit) | ~40% faster inference |
+| LLM streaming | Disabled | Enabled | Lower first-token latency |
+| LLM max tokens | 150 | 80 | Shorter generation |
+| LLM context window | 2048 | 512 | Less memory, faster |
 | Temperature | 0.7 | 0.3 | Less sampling overhead |
-| Streaming | `stream: False` | `stream: True` | First-token latency |
-| Prompt length | Unlimited | Capped at 500 chars | Prevents slow inference |
+| Audio I/O | PyAudio | arecord/aplay (ALSA) | More reliable, less overhead |
 
-```python
-# GRADPLUTOFINAL - offlinemode.py (streaming)
-response = requests.post('http://localhost:11434/api/generate', json={
-    'model': 'qwen2.5:0.5b-instruct-q2_k',
-    'prompt': prompt[:500],
-    'stream': True,
-    'options': {
-        'temperature': 0.3,
-        'num_predict': 80,
-        'num_ctx': 512,
-        'top_p': 0.9,
-        'repeat_penalty': 1.1
-    }
-})
-full_response = ""
-for line in response.iter_lines():
-    if line:
-        data = json.loads(line)
-        full_response += data.get('response', '')
-        if data.get('done', False):
-            break
-```
+**Table 11a: V4 Latency — Timeline Benchmark (Fixed Query, N=10 Trials)**
 
-**Tested result:** LLM latency reduced from 1,890 ms to **800–2,000 ms** (target: <1,500 ms).
+| Stage | Mean ± SD (ms) |
+|-------|-----------|
+| STT (faster-whisper base, INT8, beam=1) | 4,545 ± 87 |
+| LLM (Qwen2.5 0.5B, q2_K, streaming) | 4,337 ± 2,509 |
+| TTS (Piper, en_US-lessac-medium) | 4,144 ± 608 |
+| **Total processing** | **13,026 ± 2,579** |
 
-#### 8.3.3 TTS: Piper with Caching
+**Table 11b: V4 Latency — Varied Query Benchmark (10 Different Queries)**
 
-| Parameter | pluto-voice-assistant | GRADPLUTOFINAL | Impact |
-|-----------|----------------------|----------------|--------|
-| Speed | length_scale=1.0 | length_scale=1.0 (unchanged) | — |
-| Caching | None | Hash-based WAV caching | Instant for repeated phrases |
-| Playback | PyAudio subprocess | aplay (direct ALSA) | ~50 ms faster |
-| Output | Write WAV, then play | Direct PCM output | Eliminates temp file I/O |
+| Stage | Mean ± SD (ms) | Range (ms) |
+|-------|---------------|------------|
+| Audio recording (fixed) | 3,000 | — |
+| STT (faster-whisper base, INT8, beam=1) | 4,423 ± 111 | 4,248 – 4,619 |
+| LLM (Qwen2.5 0.5B, q2_K, streaming) | 5,683 ± 4,416 | 1,888 – 15,899 |
+| LLM first token | 2,240 ± 3,526 | 989 – 12,817† |
+| TTS (Piper, en_US-lessac-medium) | 5,713 ± 4,488 | 1,995 – 13,706 |
+| **Total processing (STT + LLM + TTS)** | **15,818 ± 7,940** | **8,355 – 26,860** |
 
-The TTS caching system uses a SHA-256 hash of the text to create unique cache filenames:
+†Trial 1 first-token latency (12,817 ms) reflects Ollama model cold-start (loading weights into RAM). Warm trials 2–10 averaged 1,064 ± 43 ms first-token latency.
 
-```python
-# GRADPLUTOFINAL - tts_worker.py
-def get_cache_path(self, text):
-    text_hash = hashlib.sha256(text.encode()).hexdigest()[:16]
-    return os.path.join(self.cache_dir, f"{text_hash}.wav")
-```
+**Note on variance:** LLM and TTS latencies are strongly correlated with response length. Short responses (≤15 words, 5 of 10 trials) averaged 8,950 ms total processing; longer responses (>50 words, 4 of 10 trials) averaged 25,441 ms. STT latency is consistent (CV = 2.5%) because input audio length was similar across trials. See Figure: `paper_figures/fig4_v4_per_trial.png` and `paper_figures/fig9_variance_analysis.png`.
 
-Common phrases like "Hello!", "I'm thinking...", "Goodbye!" are pre-generated at startup and played instantly from cache without invoking Piper.
+### 5.5 Model Selection Analysis
 
-**Tested result:** TTS latency reduced from 205 ms to **100–300 ms** (target: <200 ms).
+**STT model selection.** Three Whisper model sizes were evaluated on the Raspberry Pi 4:
 
-#### 8.3.4 Audio: Direct ALSA Instead of PyAudio
+**Table 12: Whisper Model Size vs. Latency (faster-whisper, INT8)**
 
-The single biggest reliability improvement was replacing PyAudio entirely with direct `arecord`/`aplay` subprocess calls:
+| Model | Parameters | STT Latency (N=10) | Accuracy | Decision |
+|-------|-----------|------------|----------|----------|
+| tiny | 39M | 2,566 ± 45 ms (faster-whisper INT8) | Low (frequent errors) | Too inaccurate |
+| base | 74M | 4,545 ± 87 ms (faster-whisper INT8) | Acceptable | **Selected** |
+| small | 244M | ~66,000 ms‡ | High | Unusable on Pi |
 
-```python
-# GRADPLUTOFINAL - offlinemode.py
-# Recording
-subprocess.run([
-    'arecord', '-D', 'hw:3,0', '-f', 'S16_LE',
-    '-r', '16000', '-c', '1', '-d', '3', filepath
-], capture_output=True)
+All values formally measured except ‡ (estimated). Note: OpenAI Whisper base on PyTorch FP32 measures 11,821 ± 56 ms on the same hardware — the faster-whisper INT8 runtime provides a 2.6× speedup for the same base model.
 
-# Playback
-subprocess.run([
-    'aplay', '-D', 'hw:3,0', filepath
-], capture_output=True)
-```
+**LLM model selection.**
 
-**Why this matters:**
-- No PyAudio initialization overhead (~200 ms on cold start)
-- No PulseAudio/ALSA routing confusion
-- No sample rate negotiation — arecord/aplay use the hardware directly
-- No channel mismatch errors
-- No dependency on PortAudio C library compilation on ARM
+**Table 13: LLM Quantization vs. Latency**
 
-#### 8.3.5 CPU Governor: Performance Mode
+| Model | Quantization | Latency | Quality | Decision |
+|-------|-------------|---------|---------|----------|
+| Qwen2.5 1.5B | 4-bit | >3,000 ms | Good | Too slow |
+| Qwen2.5 0.5B | q4_k_M (4-bit) | ~1,890 ms | Good | Acceptable |
+| Qwen2.5 0.5B | q2_K (2-bit) | 800–1,500 ms | Adequate for short responses | **Selected** |
 
-The startup script locks the CPU at maximum frequency:
+### 5.6 Voice Assistant Results Summary
 
-```bash
-# GRADPLUTOFINAL - run.sh
-echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
-```
+**Table 14: Complete Version Comparison (All Formally Measured, N=10 Trials Each)**
 
-Without this, the CPU runs in `ondemand` mode and starts at 600 MHz, ramping up to 1.5 GHz only under sustained load. For bursty voice assistant workloads (brief intense compute followed by idle), the CPU frequently starts processing at 600 MHz and doesn't ramp up before the task completes — adding ~200 ms of unnecessary latency.
+| Version | STT Engine | STT (ms) | LLM (ms) | TTS (ms) | Total (ms) |
+|---------|-----------|----------|----------|----------|------------|
+| V1 | Whisper base (PyTorch, FP32) | 11,821 ± 56 | 0 (keyword) | 2,535 ± 27 | 14,356 ± 70 |
+| V2 | Whisper base (PyTorch, FP32) | 11,807 ± 49 | 0 (keyword) | 2,542 ± 34 | 14,349 ± 56 |
+| V3 | Whisper tiny (PyTorch, FP32) | 4,653 ± 35 | 5,299 ± 4,579 | 4,029 ± 1,415 | 13,981 ± 5,086 |
+| V3-opt | faster-whisper tiny (INT8) | 2,566 ± 45 | 5,464 ± 3,953 | 4,726 ± 1,316 | 12,757 ± 3,998 |
+| **V4** | **faster-whisper base (INT8)** | **4,545 ± 87** | **4,337 ± 2,509** | **4,144 ± 608** | **13,026 ± 2,579** |
 
-#### 8.3.6 Energy-Based VAD and Audio Normalization
+All values are formally measured on RPi4 (N=10 trials, mean ± SD) using identical test methodology and the same Piper-generated test audio.
 
-Custom voice activity detection replaced Whisper's built-in VAD:
+See Figure: `paper_figures/fig1_total_latency.png` and `paper_figures/fig2_component_breakdown.png`.
 
-```python
-# GRADPLUTOFINAL - offlinemode.py
-audio_data = np.frombuffer(raw_audio, dtype=np.int16).astype(np.float32) / 32768.0
+**Key insight: Constant latency, increasing capability.** Total processing time is remarkably stable across all five versions (~13–14 seconds). The fastest version is V3-opt (12,757 ms), not V4, because V3-opt uses the smaller Whisper tiny model. V4 trades STT speed for accuracy by using the base model (74M vs 39M parameters). The primary achievement across V1→V4 is not raw latency reduction but enabling LLM-powered conversational AI on a \$35 device with no network dependency — while maintaining the same total response time.
 
-# Normalize to 0.95 peak
-max_val = np.max(np.abs(audio_data))
-if max_val > 0:
-    audio_data = audio_data * (0.95 / max_val)
+See Figure: `paper_figures/fig7_capability_vs_latency.png`.
 
-# Energy check
-energy = np.sqrt(np.mean(audio_data ** 2))
-if energy < 0.01:  # Silence threshold
-    return  # Skip Whisper entirely — no speech detected
-```
+**STT engine dominates V1/V2:** OpenAI Whisper base on PyTorch FP32 takes 11.8 seconds — 82% of V1/V2 total latency. This is because Whisper pads all audio to 30 seconds internally before processing, regardless of actual input length. Switching to faster-whisper (CTranslate2, INT8) in V3-opt reduced STT from 11.8s to 2.6s (4.6× speedup), but this gain was reallocated to LLM inference, keeping total latency constant.
 
-This saves the full Whisper inference cost (~100–200 ms) on silent frames, which occur frequently when the system is waiting between conversations.
+**Figure 5: Voice Assistant Latency Progression Across Versions (All Formally Measured)**
 
-### 8.4 Tested Performance — Final System
+![Total Latency Comparison](paper_figures/fig1_total_latency.png)
 
-| Stage | Tested Time | Target |
-|-------|-------------|--------|
-| Audio recording (fixed) | 3,000 ms | — |
-| Energy VAD check | <1 ms | — |
-| Audio normalization | <1 ms | — |
-| faster-whisper transcription (base, INT8, beam=1) | 60–150 ms | <200 ms |
-| Ollama LLM (Qwen2.5:0.5b, q2_K, streaming) | 800–2,000 ms | <1,500 ms |
-| Piper TTS synthesis | 100–300 ms | <200 ms |
-| aplay playback | (length of speech) | — |
-| **Total processing (STT + LLM + TTS)** | **960–2,450 ms** | **<2,000 ms** |
+*All values formally measured on RPi4 with N=10 trials each. V1/V2 (gray) use keyword matching with no LLM. V3+ (purple) include a full LLM. Total latency is remarkably stable at ~13–14s across all versions — the gain from faster STT engines is consumed by the addition of LLM inference. V3-opt achieves the lowest total latency (12.8s) due to the smallest STT model (Whisper tiny).*
 
-The latency is logged at runtime for every interaction:
-```
-📊 Latency: STT 95ms + LLM 1200ms + TTS 150ms = 1445ms
-```
+**Figure 6: Component Latency Breakdown — All Versions (Stacked)**
 
-Additional granular measurements logged:
-- STT warmup time
-- LLM warmup time (first cold-load can take up to 120 seconds)
-- TTS warmup time
-- First LLM token latency (streaming)
-- TTS synthesis time vs. total time (synthesis + playback)
+![Component Breakdown](paper_figures/fig2_component_breakdown.png)
+
+*All values formally measured (N=10 trials). V1/V2 are dominated by Whisper STT (11.8s, blue). V3+ show a more balanced distribution across STT, LLM, and TTS. V4 achieves roughly equal distribution across all three components (~4.5s each).*
+
+**Figure 7: Capability vs. Latency — The Key Insight**
+
+![Capability vs Latency](paper_figures/fig7_capability_vs_latency.png)
+
+*Dual-axis chart showing total latency (bars) and AI capability level (line). Despite a 4.5× increase in capability (keyword matching → full conversational AI), total latency remains at ~13–14 seconds across all versions. The STT speedup from engine optimization (11.8s → 2.6–4.5s) was exactly consumed by the addition of LLM inference (0s → 4.3–5.5s).*
+
+**Table 16: V4 Formal Benchmark Results (N=10 Trials)**
+
+| Trial | Query | STT (ms) | LLM (ms) | TTS (ms) | Total (ms) |
+|-------|-------|----------|----------|----------|------------|
+| 1 | "Hello, what is the weather today?" | 4,588 | 15,899 | 4,734 | 25,220 |
+| 2 | "Tell me a fun fact about robots." | 4,619 | 8,312 | 10,854 | 23,785 |
+| 3 | "What time is it?" | 4,329 | 2,158 | 2,103 | 8,590 |
+| 4 | "How does a computer work?" | 4,394 | 8,884 | 12,622 | 25,900 |
+| 5 | "What is your name?" | 4,357 | 2,423 | 2,937 | 9,717 |
+| 6 | "Tell me a short joke." | 4,476 | 2,705 | 2,528 | 9,710 |
+| 7 | "What is artificial intelligence?" | 4,332 | 8,822 | 13,706 | 26,860 |
+| 8 | "How far is the moon?" | 4,411 | 3,715 | 3,538 | 11,664 |
+| 9 | "What is the capital of Egypt?" | 4,472 | 1,888 | 1,995 | 8,355 |
+| 10 | "Say something nice." | 4,248 | 2,022 | 2,110 | 8,380 |
+| **Mean ± SD** | | **4,423 ± 111** | **5,683 ± 4,416** | **5,713 ± 4,488** | **15,818 ± 7,940** |
+
+Notable patterns: (1) STT latency is highly consistent (CV = 2.5%), confirming deterministic transcription performance. (2) LLM and TTS variance is dominated by response length — short factual answers (trials 3, 9, 10) complete in ~8.4s total, while open-ended questions (trials 4, 7) require ~26s. (3) Trial 1 exhibits LLM cold-start: first-token latency of 12,817 ms vs. ~1,050 ms for warm trials.
+
+**Figure: V4 Per-Trial Latency Breakdown (Sorted by Total Time)**
+
+![V4 Per-Trial](paper_figures/fig4_v4_per_trial.png)
+
+*Trials sorted by total latency. Short factual queries (left) complete in ~8–9s while open-ended questions (right) require ~25–27s. STT (blue) is constant across all trials; variance is entirely in LLM (orange) and TTS (green), both of which scale with response length.*
+
+**Figure: Latency Variance Analysis (Coefficient of Variation)**
+
+![Variance Analysis](paper_figures/fig9_variance_analysis.png)
+
+*STT has <2% coefficient of variation (deterministic fixed-length input). LLM and TTS have 58–86% CV because their processing time scales with variable-length output.*
+
+**Figure: INT8 Quantization Failure Visualization**
+
+![INT8 Failure](paper_figures/fig8_int8_failure.png)
+
+*Left: Value range compression under per-tensor INT8 quantization — objectness and class scores are crushed to 0–0.08. Right: Maximum achievable confidence (0.0064) falls far below any usable detection threshold (0.25–0.5).*
 
 ---
 
-## 9. Phase 7: Model Selection Oscillation
+## 6. Experimental Methodology
 
-### 9.1 The Whisper Model Problem
+### 6.1 Test Conditions
 
-The commit history of GRADPLUTOFINAL reveals that the Whisper model size changed **five times** in a single day (January 17, 2026):
+All measurements were collected on the Raspberry Pi 4 Model B (4 GB) under controlled conditions:
 
-```mermaid
-flowchart LR
-    A["tiny\n(39M params)\n~60ms"] --> B["base\n(74M params)\n~150ms"]
-    B --> C["small\n(244M params)\n~66,000ms ❌"]
-    C --> D["base\n(74M params)\n~150ms"]
-    D --> E["tiny\n(config.py)"]
+- CPU governor set to `performance` (locked at 1.5 GHz)
+- Ambient temperature: ~25°C (indoor)
+- Background processes: minimal (SSH + system services)
+- Models pre-loaded and warmed up before measurement
+- Same pre-recorded audio input used across all voice assistant trials for repeatability
 
-    style A fill:#4CAF50,color:#fff
-    style B fill:#2196F3,color:#fff
-    style C fill:#f44336,color:#fff
-    style D fill:#2196F3,color:#fff
-    style E fill:#ff9800,color:#fff
-```
+### 6.2 Detection Benchmark
 
-| Model | Parameters | Tested STT Latency (RPi4) | Accuracy | Decision |
-|-------|-----------|---------------------------|----------|----------|
-| `tiny` | 39M | ~60 ms | Low — frequent misheard words | Too inaccurate |
-| `base` | 74M | ~150 ms | Good — acceptable for voice | **Selected for offlinemode** |
-| `small` | 244M | ~66,000 ms (66 seconds!) | High | Completely unusable on Pi |
+N=10 trials of 100 frames each. Each frame passes through the complete pipeline (capture → preprocess → inference → NMS → draw). The first 10 frames per trial are discarded (camera auto-exposure warmup). Metrics: per-frame inference time, pipeline FPS, detection rate, and average confidence. Reported as mean ± standard deviation across trials.
 
-The `small` model was tested and immediately rejected — at 66 seconds for a single transcription, it was **440× slower** than `tiny`. The `base` model became the final choice for `offlinemode.py`, while `config.py` still references `tiny` (used by the worker-based `main.py`), creating an inconsistency between the two entry points.
+### 6.3 Voice Assistant Benchmark
 
-### 9.2 The LLM Model Progression
+N=10 complete interaction cycles per version (STT → LLM → TTS). Each trial uses a different query to exercise the LLM with varied input. A Piper-generated WAV file serves as the input audio for all STT tests, ensuring identical acoustic conditions across versions and trials. Metrics: per-component latency and total processing time. Reported as mean ± standard deviation.
 
-| Model | Quantization | Parameters | Tested on RPi4 |
-|-------|-------------|-----------|-----------------|
-| qwen2.5:1.5b | 4-bit | 1.5B | Too slow — >3 seconds per response |
-| qwen2.5:0.5b-instruct-q4_k_M | 4-bit | 0.5B | 1,890 ms — usable but slow |
-| qwen2.5:0.5b-instruct-q4_K_M | 4-bit | 0.5B | **Model not found** (uppercase K bug) |
-| qwen2.5:0.5b-instruct-q2_k | 2-bit | 0.5B | 800–1,500 ms — **selected** |
-
-The 2-bit quantization (q2_K) was a bold choice that traded some response coherence for a ~40% speed improvement. For short voice responses (1–2 sentences), the quality difference was acceptable.
+The benchmark script instantiates each version's exact engine and configuration (Table 10), loads the corresponding models, and measures wall-clock time using `time.perf_counter()` for microsecond resolution.
 
 ---
 
-## 10. Phase 8: Online Mode — Cloud-Powered Alternative
+## 7. Discussion
 
-### 10.1 Motivation
+### 7.1 Runtime Selection Dominates Code Optimization
 
-While the offline mode achieved sub-2-second processing, an online mode was developed for scenarios where internet connectivity was available and faster responses were desired.
+Across both projects, the largest performance gains came from inference runtime replacement rather than application-level code optimization:
 
-### 10.2 Online Architecture
+**Table 15: Optimization Impact by Category**
 
-```mermaid
-flowchart LR
-    A["🎤 arecord\n16kHz, 3s"] --> B["📤 FLAC compress\n+ upload"]
-    B --> C["☁️ Groq API\nwhisper-large-v3-turbo"]
-    C --> D["☁️ Groq API\ngpt-oss-120b\nreasoning_effort=low"]
-    D --> E["☁️ ElevenLabs\neleven_flash_v2_5\nstreaming"]
-    E --> F["🔈 Stream to\nspeaker"]
+| Change | Measured Speedup | Category |
+|--------|---------|----------|
+| PyTorch → TFLite (detection) | ~4× inference | Runtime |
+| OpenAI Whisper → faster-whisper (voice) | 4.6× STT (base FP32 11,821ms → tiny INT8 2,566ms) | Runtime |
+| 320→224 resolution (detection) | 4.25× inference | Architecture |
+| q4_k_M → q2_K (voice) | ~18% LLM reduction (5,299 → 4,337 ms) | Quantization |
+| Threaded capture (detection) | ~15% pipeline | Pipeline |
+| Vectorized NumPy (detection) | ~10% post-processing | Code |
 
-    style A fill:#4CAF50,color:#fff
-    style B fill:#2196F3,color:#fff
-    style C fill:#2196F3,color:#fff
-    style D fill:#FF9800,color:#fff
-    style E fill:#9C27B0,color:#fff
-    style F fill:#F44336,color:#fff
-```
+All voice assistant speedups are from formally measured N=10 benchmarks. See Figure: `paper_figures/fig6_optimization_impact.png`.
 
-### 10.3 Online Components
+This ordering confirms that practitioners targeting edge deployment should prioritize runtime selection and quantization strategy before investing in code-level optimization.
 
-| Component | Service | Configuration |
-|-----------|---------|---------------|
-| STT | Groq API | whisper-large-v3-turbo (cloud inference) |
-| LLM | Groq API | gpt-oss-120b, reasoning_effort="low" |
-| TTS | ElevenLabs | eleven_flash_v2_5, streaming audio |
-| Audio Upload | FLAC compression | WAV → FLAC before upload (smaller payload) |
+**Figure 8: Optimization Impact Hierarchy — Both Projects Combined**
 
-Key online-specific optimizations:
-- **FLAC compression:** Raw 16 kHz WAV is compressed to FLAC before uploading to Groq, reducing upload time on slow connections
-- **reasoning_effort="low":** Tells the Groq model to use minimal reasoning, prioritizing speed over depth
-- **ElevenLabs streaming:** Audio is streamed chunk-by-chunk as it is generated, with first-chunk latency tracked separately
-- **0.6-second silence cutoff:** Faster end-of-speech detection than offline mode's 0.7 seconds
+![Optimization Impact](paper_figures/fig6_optimization_impact.png)
 
-### 10.4 Online vs. Offline Comparison
+*Aggregated across both projects, runtime selection (PyTorch → TFLite, PyTorch → CTranslate2) provides nearly half of all performance gains. Code-level optimization contributes only 5%.*
 
-| Aspect | Offline | Online |
-|--------|---------|--------|
-| Internet required | No | Yes |
-| STT model | faster-whisper base (74M, local) | whisper-large-v3-turbo (cloud) |
-| STT accuracy | Good | Excellent |
-| LLM model | Qwen2.5 0.5B (local) | gpt-oss-120b (cloud) |
-| LLM quality | Basic | High |
-| TTS voice | Piper (robotic but fast) | ElevenLabs (natural, human-like) |
-| Total latency | 960–2,450 ms processing | Dependent on network latency |
-| Privacy | Full — no data leaves device | Audio sent to cloud APIs |
-| Cost | Free | API usage fees |
+### 7.2 Quantization Strategy Must Match Output Topology
+
+The INT8 per-tensor quantization failure (Section 4.4) demonstrates that quantization is not a universally safe optimization. YOLO detection heads concatenate values with fundamentally different ranges (coordinates: 0–320; probabilities: 0–1) into a single output tensor. Per-tensor quantization assigns one scale factor to the entire tensor, compressing the smaller-range values to a few discrete INT8 levels.
+
+**Recommendation:** For models with multi-range output tensors, use per-channel quantization, mixed-precision quantization, or float16. Always validate quantized outputs against the original float model before deployment.
+
+### 7.3 Architectural Simplicity on Constrained Hardware
+
+The voice assistant's final single-file sequential pipeline outperformed the multi-threaded architecture in both latency and reliability. On the Raspberry Pi 4 with only 4 CPU cores, threading overhead (synchronization, queue management, context switching) consumed resources that the sequential pipeline allocated entirely to inference. This finding contradicts the general software engineering intuition that concurrency improves throughput; on severely constrained hardware, the overhead of concurrency itself becomes the bottleneck.
+
+### 7.4 Audio Infrastructure
+
+USB audio integration on embedded Linux (device enumeration at boot, sample rate negotiation, PyAudio reliability) consumed disproportionate engineering effort relative to AI model optimization. Direct ALSA hardware access (`arecord`/`aplay`) proved more reliable than abstraction layers. This is a practical consideration for any Raspberry Pi deployment requiring audio I/O.
+
+### 7.5 Limitations
+
+1. **Detection accuracy:** Confidence scores and detection rates are reported, but formal accuracy metrics (mAP, precision, recall) against a labeled validation set were not computed. The system was evaluated on live camera input with visual verification rather than against a benchmark dataset (e.g., COCO val2017).
+
+2. **Voice response quality:** LLM output quality was assessed subjectively (response coherence for short interactions) rather than with formal NLG metrics (BLEU, METEOR, or human evaluation).
+
+3. **Single hardware platform:** All measurements are specific to the Raspberry Pi 4 Model B. Results may differ on other ARM platforms (Raspberry Pi 5, Jetson Nano, Orange Pi) due to different CPU architectures and memory configurations.
+
+4. **Thermal considerations:** Extended operation at sustained load was not characterized. CPU throttling under thermal stress could reduce steady-state performance below the reported values.
 
 ---
 
-## 11. Results Summary
+## 8. Conclusion and Future Work
 
-### 11.1 Response Time Evolution
+This paper presented two complementary optimization studies on the Raspberry Pi 4:
 
-```mermaid
-xychart-beta
-    title "End-to-End Processing Time Across Versions"
-    x-axis ["V1: Keyword\nChatbot", "V2: Audio\nFixes", "V3: LLM\nBaseline", "V3: LLM\nOptimized", "V4: Final\n(GRADPLUTO)"]
-    y-axis "Processing Time (ms)" 0 --> 12000
-    bar [11000, 8500, 2340, 1380, 1445]
-```
+1. **Human detection** achieved a 10× throughput improvement (2 → 20 FPS) through runtime migration (PyTorch → TFLite), float16 quantization, resolution reduction (320 → 224), and pipeline engineering. A failure case in INT8 per-tensor quantization for YOLO outputs was identified and analyzed.
 
-### 11.2 Complete Comparison Table
+2. **Voice assistant** delivered fully offline conversational AI (STT + LLM + TTS) on the Raspberry Pi 4, formally benchmarked across all five versions (V1, V2, V3, V3-opt, V4) with N=10 trials each. The key finding is that total latency remains remarkably stable at ~13–14 seconds across all versions (V1: 14,356 ± 70 ms, V4: 13,026 ± 2,579 ms), while capability increased from keyword matching to full conversational AI. The V3-opt version achieves the lowest total latency (12,757 ± 3,998 ms) using Whisper tiny INT8, while V4 allocates this STT time savings to run a larger STT model (base, 74M parameters) for better accuracy. The system evolved from keyword matching (V1/V2) to real language model conversation (V4) through inference engine selection (CTranslate2 for STT, llama.cpp via Ollama for LLM), aggressive quantization (INT8 STT, 2-bit LLM), and architectural simplification.
 
-| Metric | V1: -pluto-chatbot | V2: pluto-chatbot | V3: pluto-voice-assistant (baseline) | V3: pluto-voice-assistant (optimized) | V4: GRADPLUTOFINAL |
-|--------|-------------------|-------------------|-------------------------------------|--------------------------------------|-------------------|
-| **STT Engine** | Whisper base (FP32) | Whisper base (FP32) | Whisper tiny (FP32) | faster-whisper tiny (INT8) | faster-whisper base (INT8) |
-| **STT Latency** | 3,000–5,000 ms | 3,000–5,000 ms | 245 ms | 60 ms | 60–150 ms |
-| **Language Processing** | Keyword matching | Keyword matching | Ollama Qwen2.5 0.5B (q4_k_M) | Ollama Qwen2.5 0.5B (q2_K) | Ollama Qwen2.5 0.5B (q2_K) |
-| **LLM Latency** | <1 ms (no LLM) | <1 ms (no LLM) | 1,890 ms | 1,200 ms | 800–2,000 ms |
-| **TTS Engine** | Piper (1.0× speed) | Piper (1.0× speed) | Piper (1.0× speed) | Piper (0.8× speed) | Piper + cache |
-| **TTS Latency** | 1,000–2,000 ms | 1,000–2,000 ms | 205 ms | 120 ms | 100–300 ms |
-| **Audio Capture** | PyAudio (broken VAD) | PyAudio (fixed 3.5s) | PyAudio (energy VAD) | PyAudio (energy VAD) | arecord (fixed 3s) |
-| **Audio Playback** | PyAudio | aplay + fallback | PyAudio | PyAudio | aplay direct |
-| **Total Processing** | **8,000–14,000 ms** | **8,000–11,000 ms** | **2,340 ms** | **1,380 ms** | **960–2,450 ms** |
-| **Intelligence** | None (keyword) | None (keyword) | Full LLM | Full LLM | Full LLM |
-| **Architecture** | 5 layers, no threads | 5 layers, no threads | 4 workers + orchestrator + FSM | Same + optimizations | Single-file, simple loop |
-| **Commits** | 1 | 27 | ~80 | — | 32 |
+See Figure: `paper_figures/fig10_summary_dashboard.png` for a summary of both projects' key results.
 
-### 11.3 Where the Time Went — Per-Component Breakdown
+Both studies demonstrate that on ARM-based edge devices the dominant optimization strategy is infrastructure selection — choosing the appropriate inference runtime and quantization level — rather than application-level code optimization.
 
-```mermaid
-pie title "V1: Keyword Chatbot (~11s total)"
-    "Whisper STT (FP32)" : 4000
-    "Recording" : 3500
-    "Piper TTS" : 1500
-    "Playback" : 2000
-    "Intent/Response" : 1
-```
+### Future Work
 
-```mermaid
-pie title "V4: GRADPLUTOFINAL (~1.4s processing)"
-    "faster-whisper STT (INT8)" : 100
-    "Ollama LLM (q2_K, streaming)" : 1100
-    "Piper TTS (cached)" : 200
-    "VAD + Audio Processing" : 5
-```
-
-### 11.4 Optimization Impact — Individual Contributions
-
-| Optimization | Time Saved | Source |
-|-------------|-----------|--------|
-| OpenAI Whisper → faster-whisper (CTranslate2) | -3,850 ms | V1→V4 STT engine change |
-| FP32 → INT8 quantization (STT) | Included above | Part of faster-whisper |
-| beam_size 5 → 1 | ~-50 ms | GRADPLUTOFINAL |
-| None → Ollama LLM (added intelligence) | +1,890 ms | V2→V3 (cost of adding LLM) |
-| q4_k_M → q2_K quantization (LLM) | -690 ms | V3→V4 |
-| stream: False → stream: True | ~-300 ms perceived | First-token latency improvement |
-| 150 → 60–80 max tokens | ~-500 ms | Shorter generation |
-| num_ctx 2048 → 512 | ~-200 ms | Less memory overhead |
-| temperature 0.7 → 0.3 | ~-50 ms | Less sampling computation |
-| Piper length_scale 1.0 → 0.8 | ~-40 ms | Faster TTS synthesis |
-| TTS phrase caching | -120 ms (cached) | Instant for common phrases |
-| PyAudio → arecord/aplay | -200 ms | No PortAudio overhead |
-| CPU governor → performance | ~-200 ms | No frequency ramp-up delay |
-| Silence-to-fixed recording | -26,500 ms (worst case) | 30s timeout → 3s fixed |
-| Custom VAD (skip silent frames) | -100 ms avg | Avoids unnecessary Whisper calls |
+1. **Formal accuracy evaluation:** Computing mAP on COCO val2017 for detection, and standard NLG metrics for voice response quality.
+2. **ROS 2 integration:** Wrapping the detection pipeline as a ROS 2 node for validation in a robotic system context.
+3. **Streaming TTS:** Implementing sentence-level TTS streaming to begin synthesis while the LLM is still generating, reducing perceived latency.
+4. **Quantization-aware training:** Training YOLO models with simulated quantization noise to enable reliable INT8 deployment with per-tensor output quantization.
 
 ---
 
-## 12. Mistakes and Bad Decisions — A Complete Post-Mortem
+## References
 
-### 12.1 The Vision System (Severity: Critical)
+[1] J. Redmon, S. Divvala, R. Girshick, and A. Farhadi, "You Only Look Once: Unified, Real-Time Object Detection," in *Proc. IEEE CVPR*, 2016, pp. 779–788.
 
-**What happened:** A face detection system (YuNet) was added to make the assistant "vision-aware." It consumed 30+ commits over a month, introduced 8+ bugs, required emergency camera reset scripts, and was **completely removed** — contributing zero value to the final product.
+[2] Ultralytics, "YOLOv5," 2021. [Online]. Available: https://github.com/ultralytics/yolov5
 
-**Why it was wrong:** The project goal was a **voice** assistant. Adding computer vision to a device that was already struggling with audio processing was scope creep. The vision system consumed CPU cycles, memory, and — most importantly — engineering time that should have been spent optimizing the voice pipeline.
+[3] Ultralytics, "YOLOv8," 2023. [Online]. Available: https://github.com/ultralytics/ultralytics
 
-**Cost:** ~30 commits, ~1 month of engineering time, residual architectural damage (paused STT worker, dead documentation).
+[4] V. Mazzia, A. Khaliq, and M. Chiaberge, "Real-Time Apple Detection System Using Embedded Systems With Hardware Accelerator: An Edge AI Application," *IEEE Access*, vol. 8, pp. 9102–9114, 2020.
 
-### 12.2 Over-Engineering the Architecture (Severity: High)
+[5] TensorFlow, "TensorFlow Lite." [Online]. Available: https://www.tensorflow.org/lite
 
-**What happened:** The `pluto-voice-assistant` used a 4-worker multi-threaded architecture with an orchestrator, an 8-state finite state machine, a metrics logger, health monitoring with memory/queue depth checks, CSV/JSON metric export, and threshold-based warning systems.
+[6] B. Jacob et al., "Quantization and Training of Neural Networks for Efficient Integer-Arithmetic-Only Inference," in *Proc. IEEE CVPR*, 2018, pp. 2704–2713.
 
-**Why it was wrong:** This complexity was designed for a system that needed to scale — but a Raspberry Pi voice assistant does not scale. It runs one conversation at a time. A simple sequential loop (record → transcribe → generate → speak) would have been sufficient and far easier to debug and optimize. The GRADPLUTOFINAL rewrite proved this — `offlinemode.py` is a single file with a simple loop, and it is faster than the multi-threaded version.
+[7] A. Radford, J. W. Kim, T. Xu, G. Brockman, C. McLeavey, and I. Sutskever, "Robust Speech Recognition via Large-Scale Weak Supervision," in *Proc. ICML*, 2023.
 
-### 12.3 Using PyAudio for Everything (Severity: Medium)
+[8] SYSTRAN, "faster-whisper," [Online]. Available: https://github.com/SYSTRAN/faster-whisper
 
-**What happened:** All three early versions used PyAudio for both recording and playback. This caused: channel mismatch errors, sample rate negotiation failures, device enumeration inconsistencies at boot, and unreliable playback.
+[9] G. Klein, "CTranslate2," [Online]. Available: https://github.com/OpenNMT/CTranslate2
 
-**What worked:** Direct ALSA commands (`arecord`/`aplay`) with explicit hardware device specification (`hw:3,0`). No negotiation, no abstraction layer, no PulseAudio routing — just direct hardware access.
+[10] M. Hansen, "Piper — Neural Text to Speech," [Online]. Available: https://github.com/rhasspy/piper
 
-### 12.4 Non-Streaming LLM (Severity: Medium)
+[11] Ollama, "Get up and running with large language models locally," [Online]. Available: https://ollama.ai
 
-**What happened:** The `pluto-voice-assistant` used `stream: False` in the Ollama API call, waiting for the complete response before starting TTS. This meant the user perceived the full LLM generation time (1,200–1,890 ms) as dead silence.
+[12] G. Gerganov, "llama.cpp," [Online]. Available: https://github.com/ggerganov/llama.cpp
 
-**What worked:** GRADPLUTOFINAL uses `stream: True` and begins accumulating tokens as they arrive. While the current implementation still waits for the full response before speaking (TTS cannot begin mid-stream easily with Piper), the streaming approach enables first-token latency tracking and faster perceived response in future implementations.
+[13] Raspberry Pi Foundation, "Raspberry Pi 4 Model B Specifications," [Online]. Available: https://www.raspberrypi.org/products/raspberry-pi-4-model-b/
 
-### 12.5 Whisper Model Oscillation (Severity: Low)
+[14] Google AI Edge, "ai-edge-litert — TFLite Runtime for Python 3.12+," PyPI, 2024.
 
-**What happened:** The Whisper model size changed 5 times in one day: tiny → base → small → base → tiny. The `small` model was tested despite being obviously too large for a Raspberry Pi 4 — at 244M parameters, it took **66 seconds** for a single transcription.
-
-**Lesson:** Model selection should be done systematically. The relationship between parameter count and inference time on ARM is roughly linear — a 6× larger model will be roughly 6× slower. The `small` model should have been eliminated by estimation alone.
-
-### 12.6 Emoji Characters in Python Source (Severity: Low)
-
-**What happened:** Python source files contained emoji characters (🎤, ✅, 📊, etc.) in string literals and comments. These caused `SyntaxError: Non-UTF-8 code` on the Raspberry Pi's Python installation, which used ASCII as the default encoding.
-
-**Fix:** A cleanup commit removed all non-ASCII characters. A `# -*- coding: utf-8 -*-` header would have also worked.
-
-### 12.7 Documentation Drift (Severity: Low)
-
-**What happened:** After removing the vision system, the README still described a "Vision Worker" and "face detection flow." The `DOCUMENTATION.md` referenced **Vosk** as the STT engine — a technology from an earlier prototype that was never committed to any repository. Architecture diagrams still showed camera input.
-
-**Impact:** Any new developer trying to understand the system would be misled by the documentation.
-
-### 12.8 Model Name Case Sensitivity (Severity: Low)
-
-**What happened:** Ollama model tags are case-sensitive. `q4_K_M` (uppercase K) is not the same as `q4_k_M` (lowercase k). The wrong casing caused `model not found` errors that were difficult to diagnose because the error message wasn't logged clearly.
-
----
-
-## 13. Lessons Learned
-
-### 13.1 Start Simple, Optimize Later
-
-The `pluto-voice-assistant` started with a complex multi-threaded architecture and then spent months debugging it. The GRADPLUTOFINAL started with a simple sequential loop and achieved better performance in 8 days.
-
-### 13.2 Measure Everything
-
-GRADPLUTOFINAL logs latency for every component at every interaction:
-```
-📊 Latency: STT 95ms + LLM 1200ms + TTS 150ms = 1445ms
-```
-
-This made it immediately clear that the LLM was the bottleneck, focusing optimization effort on the right component.
-
-### 13.3 The Right Abstraction Level for the Hardware
-
-On a Raspberry Pi with 4 GB RAM:
-- **Use subprocess calls** for audio (arecord/aplay) rather than Python audio libraries
-- **Use CTranslate2** (faster-whisper) rather than PyTorch (OpenAI Whisper) for inference
-- **Use the most aggressive quantization** that still produces acceptable output (INT8 for STT, 2-bit for LLM)
-- **Set the CPU governor to performance** — frequency scaling adds latency to bursty workloads
-
-### 13.4 Scope Discipline
-
-Adding face detection to a voice assistant was classic scope creep. Every feature that isn't directly on the critical path (mic → STT → LLM → TTS → speaker) is a distraction. The vision system consumed more engineering time than all voice optimizations combined.
-
-### 13.5 Fixed-Duration Recording is a Feature
-
-Silence-based voice activity detection sounds elegant but is unreliable with cheap USB microphones. A fixed 3-second recording window is predictable, simple, and eliminates an entire class of bugs related to noise floors, threshold tuning, and timeout handling.
-
-### 13.6 Quantization is the Best Optimization on Edge Devices
-
-The two highest-impact optimizations were both quantization:
-1. **STT: FP32 → INT8** (via faster-whisper/CTranslate2) — 75% latency reduction
-2. **LLM: 4-bit → 2-bit** (q4_k_M → q2_K) — 37% latency reduction
-
-On ARM CPUs without GPU acceleration, reducing the precision of computations has an outsized impact because it reduces both computation and memory bandwidth requirements.
-
----
-
-## 14. Conclusion
-
-This paper documented the complete journey of building an AI voice assistant on a Raspberry Pi 4, from a keyword-matching chatbot with no intelligence and 8–14 second response times, through an over-engineered vision-driven agent with an LLM, to a clean, optimized final version achieving **sub-2-second end-to-end processing times**.
-
-The key findings are:
-
-1. **A 7× response time improvement** was achieved through systematic optimization of every pipeline stage, with the largest gains coming from engine replacement (OpenAI Whisper → faster-whisper) and aggressive quantization (FP32 → INT8 for STT, 4-bit → 2-bit for LLM).
-
-2. **Simplicity outperformed complexity.** The final single-file design (`offlinemode.py`) outperformed the 4-worker multi-threaded architecture in both speed and reliability. On resource-constrained devices, architectural overhead is a real cost.
-
-3. **Audio infrastructure consumed more engineering time than AI optimization.** USB audio on Linux, PyAudio reliability, device enumeration at boot, sample rate mismatches — these "plumbing" problems accounted for more than half of all commits across all four repositories.
-
-4. **Scope discipline is critical on edge devices.** The face detection system consumed 30+ commits and was entirely removed. Every component that doesn't directly serve the critical path subtracts from the limited CPU, memory, and engineering budget available.
-
-The final system — GRADPLUTOFINAL — demonstrates that a fully conversational AI voice assistant can run on a $35 single-board computer with sub-2-second response times, requiring no internet connection and no cloud API calls. The project evolved through failure, over-engineering, and eventual simplification — a trajectory that reflects real-world embedded AI development.
-
-```mermaid
-flowchart TD
-    V1["V1: -pluto-chatbot\n❌ No intelligence\n⏱️ 8–14s response\n📝 1 commit"] --> V2["V2: pluto-chatbot\n❌ No intelligence\n⏱️ 8–11s response\n📝 27 commits\n(audio fixes only)"]
-    V2 --> V3["V3: pluto-voice-assistant\n✅ LLM added\n❌ Vision system added\n⏱️ 2,340ms → 1,380ms\n📝 ~80 commits"]
-    V3 --> V4["V4: GRADPLUTOFINAL\n✅ Full LLM\n✅ Clean rewrite\n⏱️ 960–2,450ms\n📝 32 commits"]
-
-    style V1 fill:#f44336,color:#fff
-    style V2 fill:#ff9800,color:#fff
-    style V3 fill:#FFC107,color:#333
-    style V4 fill:#4CAF50,color:#fff
-```
-
----
-
-**Total development effort:** ~140 commits across 4 repositories over 4 months  
-**Final result:** Sub-2-second AI voice interaction on Raspberry Pi 4 (4 GB), fully offline  
-**Biggest lesson:** On constrained hardware, the simplest architecture that works is the fastest architecture.
+[15] A. G. Howard et al., "MobileNets: Efficient Convolutional Neural Networks for Mobile Vision Applications," *arXiv:1704.04861*, 2017.
