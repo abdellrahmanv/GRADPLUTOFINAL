@@ -425,10 +425,18 @@ def run_version(version_id, config, audio_float, num_trials, queries):
     if config["stt_engine"] == "openai-whisper":
         try:
             import torch  # needed for OpenAI Whisper
+            # Quick sanity check — catches "Illegal instruction" on RPi4
+            torch.zeros(1)
             stt_model = load_openai_whisper(config["stt_model"])
         except ImportError:
-            print("    ❌ openai-whisper not installed. Skipping this version.")
+            print("    ❌ openai-whisper or PyTorch not installed. Skipping this version.")
             print("       Install: pip install openai-whisper")
+            return None
+        except Exception as e:
+            print(f"    ❌ PyTorch/Whisper failed: {e}")
+            print("       This often happens on RPi4 (Cortex-A72) because PyPI PyTorch")
+            print("       wheels use ARM instructions not available on this CPU.")
+            print("       Skipping this version. Use --skip-openai to avoid this message.")
             return None
     elif config["stt_engine"] == "faster-whisper":
         try:

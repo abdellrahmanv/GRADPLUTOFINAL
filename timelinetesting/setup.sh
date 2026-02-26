@@ -47,15 +47,33 @@ echo "[1/5] Installing Python packages (inside venv)..."
 # Upgrade pip first
 pip install --upgrade pip
 
-# faster-whisper (CTranslate2 backend) — for V3-opt and V4
+# Other dependencies
+pip install numpy requests
+
+# faster-whisper (CTranslate2 backend) — for V3-opt and V4 (CRITICAL)
 pip install --upgrade faster-whisper
 
 # openai-whisper (PyTorch backend) — for V1, V2, V3
-# This is large (~800MB for PyTorch) but required for accurate V1/V2/V3 latency
-pip install --upgrade openai-whisper
-
-# Other dependencies
-pip install numpy requests
+# NOTE: PyTorch on Raspberry Pi 4 (Cortex-A72) may crash with "Illegal instruction"
+# because PyPI wheels target newer ARM CPUs. This is OPTIONAL — if it fails,
+# the benchmark will skip V1/V2/V3 automatically and still run V3-opt and V4.
+OPENAI_WHISPER_OK=false
+echo ""
+echo "  Attempting to install openai-whisper (PyTorch)..."
+echo "  NOTE: This may not work on RPi4 due to ARM instruction incompatibility."
+echo "  V3-opt and V4 benchmarks will work regardless."
+if pip install --upgrade openai-whisper 2>&1; then
+    # Test if torch actually works on this CPU
+    if python3 -c "import torch; torch.zeros(1)" 2>/dev/null; then
+        OPENAI_WHISPER_OK=true
+        echo "  ✅ openai-whisper + PyTorch installed and working"
+    else
+        echo "  ⚠️  PyTorch installed but crashes on this CPU (Illegal instruction)."
+        echo "     V1/V2/V3 will be skipped. V3-opt and V4 will work fine."
+    fi
+else
+    echo "  ⚠️  openai-whisper installation failed. V1/V2/V3 will be skipped."
+fi
 
 echo "  ✅ Python packages installed"
 
@@ -63,16 +81,7 @@ echo "  ✅ Python packages installed"
 echo ""
 echo "[2/5] Pre-downloading Whisper models (this may take a while)..."
 
-python3 -c "
-import whisper
-print('  Downloading OpenAI Whisper tiny...')
-whisper.load_model('tiny')
-print('  ✅ tiny downloaded')
-print('  Downloading OpenAI Whisper base...')
-whisper.load_model('base')
-print('  ✅ base downloaded')
-"
-
+# faster-whisper models FIRST (these always work)
 python3 -c "
 from faster_whisper import WhisperModel
 import os, numpy as np
@@ -91,7 +100,22 @@ list(m.transcribe(silence, language='en', beam_size=1)[0])
 print('  ✅ base INT8 downloaded + warmed up')
 "
 
-echo "  ✅ All Whisper models ready"
+# OpenAI Whisper models (only if PyTorch works)
+if [ "$OPENAI_WHISPER_OK" = true ]; then
+    python3 -c "
+import whisper
+print('  Downloading OpenAI Whisper tiny...')
+whisper.load_model('tiny')
+print('  ✅ tiny downloaded')
+print('  Downloading OpenAI Whisper base...')
+whisper.load_model('base')
+print('  ✅ base downloaded')
+" || echo "  ⚠️  OpenAI Whisper model download failed. V1/V2/V3 will be skipped."
+else
+    echo "  ⏭️  Skipping OpenAI Whisper model download (PyTorch not working on this CPU)."
+fi
+
+echo "  ✅ Whisper model setup complete"
 
 # ---- 3. Ollama models ----
 echo ""
@@ -156,6 +180,16 @@ echo ""
 echo "  To run the benchmark:"
 echo "    source venv/bin/activate"
 echo "    python3 benchmark_timeline.py"
+echo ""
+if [ "$OPENAI_WHISPER_OK" = true ]; then
+    echo "  All versions available (V1, V2, V3, V3-opt, V4)"
+else
+    echo "  ⚠️  PyTorch not working on this CPU."
+    echo "  Available: V3-opt, V4 (faster-whisper based)"
+    echo "  Skipped:   V1, V2, V3 (need PyTorch / OpenAI Whisper)"
+    echo ""
+    echo "  The benchmark will auto-skip unavailable versions."
+fi
 echo ""
 echo "  (The venv must be activated before running!)"
 echo "=============================================="
