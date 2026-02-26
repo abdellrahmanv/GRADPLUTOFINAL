@@ -11,7 +11,8 @@ cd ~/GRADPLUTOFINAL/timelinetesting
 
 # 2. Install all models and dependencies (~15 min, downloads ~1GB)
 chmod +x setup.sh
-./setup.sh
+./setup.sh          # creates venv + installs everything
+source venv/bin/activate   # activate the virtual environment
 
 # 3. Run the full benchmark (all 5 versions, 10 trials each, ~30 min)
 python3 benchmark_timeline.py

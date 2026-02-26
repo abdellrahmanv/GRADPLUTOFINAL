@@ -22,25 +22,46 @@ echo "=============================================="
 echo "  Timeline Testing — Setup"
 echo "=============================================="
 
+# ---- 0. Virtual environment ----
+VENV_DIR="$(dirname "$0")/venv"
+
+if [ ! -d "$VENV_DIR" ]; then
+    echo ""
+    echo "[0/5] Creating virtual environment at $VENV_DIR ..."
+    python3 -m venv "$VENV_DIR"
+    echo "  ✅ Virtual environment created"
+else
+    echo ""
+    echo "[0/5] Virtual environment already exists at $VENV_DIR"
+fi
+
+# Activate the venv for all subsequent installs
+source "$VENV_DIR/bin/activate"
+echo "  Using Python: $(which python3)"
+echo "  Using pip:    $(which pip)"
+
 # ---- 1. Python packages ----
 echo ""
-echo "[1/4] Installing Python packages..."
+echo "[1/5] Installing Python packages (inside venv)..."
+
+# Upgrade pip first
+pip install --upgrade pip
 
 # faster-whisper (CTranslate2 backend) — for V3-opt and V4
-pip install --upgrade faster-whisper 2>/dev/null || pip3 install --upgrade faster-whisper
+pip install --upgrade faster-whisper
 
 # openai-whisper (PyTorch backend) — for V1, V2, V3
 # This is large (~800MB for PyTorch) but required for accurate V1/V2/V3 latency
-pip install --upgrade openai-whisper 2>/dev/null || pip3 install --upgrade openai-whisper
+pip install --upgrade openai-whisper
 
 # Other dependencies
-pip install numpy requests 2>/dev/null || pip3 install numpy requests
+pip install numpy requests
 
 echo "  ✅ Python packages installed"
 
 # ---- 2. Pre-download Whisper models ----
 echo ""
-echo "[2/4] Pre-downloading Whisper models (this may take a while)..."
+echo "[2/5] Pre-downloading Whisper models (this may take a while)..."
 
 python3 -c "
 import whisper
@@ -74,7 +95,7 @@ echo "  ✅ All Whisper models ready"
 
 # ---- 3. Ollama models ----
 echo ""
-echo "[3/4] Pulling Ollama LLM models..."
+echo "[3/5] Pulling Ollama LLM models..."
 
 # Check if Ollama is running
 if ! curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
@@ -93,7 +114,7 @@ echo "  ✅ Ollama models ready"
 
 # ---- 4. Piper TTS ----
 echo ""
-echo "[4/4] Checking Piper TTS..."
+echo "[4/5] Checking Piper TTS..."
 
 PIPER_BIN="$HOME/piper/piper"
 PIPER_MODEL="$HOME/piper/en_US-lessac-medium.onnx"
@@ -131,5 +152,10 @@ echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governo
 echo ""
 echo "=============================================="
 echo "  Setup complete!"
-echo "  Run: python3 benchmark_timeline.py"
+echo ""
+echo "  To run the benchmark:"
+echo "    source venv/bin/activate"
+echo "    python3 benchmark_timeline.py"
+echo ""
+echo "  (The venv must be activated before running!)"
 echo "=============================================="
