@@ -9,20 +9,18 @@ on the Raspberry Pi 4, using the **exact same engines and configurations** as ea
 # 1. Copy this folder to the Pi (or git pull)
 cd ~/GRADPLUTOFINAL/timelinetesting
 
-# 2. Install all models and dependencies (~15 min, downloads ~1GB)
+# 2. Install all models and dependencies
 chmod +x setup.sh
-./setup.sh          # creates venv + installs everything
-source venv/bin/activate   # activate the virtual environment
+./setup.sh          # uses existing system packages, downloads models
 
-# 3. Run the full benchmark (all 5 versions, 10 trials each, ~30 min)
-python3 benchmark_timeline.py
-
-# 4. Or test only the faster versions (skip PyTorch/OpenAI Whisper)
+# 3. Run the benchmark (V3-opt + V4, 10 trials each)
 python3 benchmark_timeline.py --skip-openai
 
+# 4. Or run all versions (only if PyTorch works — unlikely on RPi4)
+python3 benchmark_timeline.py
+
 # 5. Or test specific versions
-python3 benchmark_timeline.py --versions V1 V4
-python3 benchmark_timeline.py --versions V3 V3-opt V4
+python3 benchmark_timeline.py --versions V3-opt V4
 ```
 
 ## What Gets Tested
@@ -47,6 +45,7 @@ The script also prints a Markdown table and LaTeX table ready to paste into the 
 ## Notes
 
 - V1 and V2 use the same STT engine; V2 only changed audio I/O (not benchmarked here since we use a WAV file, not live mic). Their STT/TTS numbers will be identical.
-- OpenAI Whisper requires PyTorch (~800MB). Use `--skip-openai` if disk space is limited.
+- OpenAI Whisper requires PyTorch (~800MB) which crashes on RPi4 due to ARM instruction incompatibility. Use `--skip-openai` on RPi4.
+- The setup script reuses your existing system Python packages (faster-whisper, numpy, etc.) — no venv needed.
 - Make sure `ollama serve` is running before testing.
 - The CPU governor is set to `performance` by `setup.sh` for consistent results.
