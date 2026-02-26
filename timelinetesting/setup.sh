@@ -56,14 +56,14 @@ fi
 echo ""
 echo "[1/5] Checking Python packages..."
 
+# Needed for Debian/RPi OS with PEP 668
+PIP_FLAGS="--break-system-packages"
+
 if [ "$FASTER_WHISPER_OK" = true ] && [ "$NUMPY_OK" = true ] && [ "$REQUESTS_OK" = true ]; then
     echo "  ✅ All required Python packages already installed"
     echo "  (Using system packages — no venv needed)"
 else
     echo "  Installing missing packages..."
-
-    # Try pip with --break-system-packages (needed on Debian/RPi OS with PEP 668)
-    PIP_FLAGS="--break-system-packages"
 
     if [ "$NUMPY_OK" = false ]; then
         pip install $PIP_FLAGS numpy 2>/dev/null || pip3 install $PIP_FLAGS numpy || \
@@ -111,8 +111,35 @@ if python3 -c "import torch; torch.zeros(1); import whisper; print('OK')" 2>/dev
     OPENAI_WHISPER_OK=true
     echo "  ✅ OpenAI Whisper + PyTorch also available (V1/V2/V3 will be tested)"
 else
-    echo "  ℹ️  OpenAI Whisper / PyTorch not available (V1/V2/V3 will be skipped)"
-    echo "     This is expected on RPi4 — PyPI PyTorch targets newer ARM CPUs."
+    echo "  ℹ️  OpenAI Whisper / PyTorch not available — trying to install..."
+    echo ""
+    echo "  Attempting PyTorch install from piwheels (ARM-compiled)..."
+    pip3 install torch --extra-index-url https://www.piwheels.org/simple $PIP_FLAGS 2>/dev/null || true
+
+    # If piwheels didn't work, try official PyTorch CPU wheel
+    if ! python3 -c "import torch; torch.zeros(1)" 2>/dev/null; then
+        echo "  piwheels failed. Trying official PyTorch ARM build..."
+        pip3 install torch --index-url https://download.pytorch.org/whl/cpu $PIP_FLAGS 2>/dev/null || true
+    fi
+
+    # Install openai-whisper if torch is working
+    if python3 -c "import torch; torch.zeros(1)" 2>/dev/null; then
+        echo "  ✅ PyTorch installed and working!"
+        echo "  Installing openai-whisper..."
+        pip3 install openai-whisper $PIP_FLAGS 2>/dev/null || true
+
+        if python3 -c "import whisper; print('OK')" 2>/dev/null | grep -q OK; then
+            OPENAI_WHISPER_OK=true
+            echo "  ✅ OpenAI Whisper + PyTorch ready (V1/V2/V3 will be tested)"
+        else
+            echo "  ⚠️  PyTorch works but openai-whisper install failed."
+            echo "     V1/V2/V3 will be skipped."
+        fi
+    else
+        echo "  ⚠️  PyTorch cannot run on this CPU (Cortex-A72 / ARMv8.0)."
+        echo "     V1/V2/V3 will be skipped — this is expected on RPi4."
+        echo "     Only V3-opt and V4 will be benchmarked."
+    fi
 fi
 
 # ---- 2. Pre-download Whisper models ----
