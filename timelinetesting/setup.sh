@@ -163,8 +163,8 @@ echo "  ✅ Ollama models ready"
 echo ""
 echo "[4/5] Checking Piper TTS..."
 
-PIPER_BIN="$HOME/GRADPLUTOFINAL/piper/piper"
-PIPER_MODEL="$HOME/GRADPLUTOFINAL/models/en_US-lessac-medium.onnx"
+PIPER_BIN="$HOME/pluto-v2/piper/piper"
+PIPER_MODEL="$HOME/pluto-v2/models/en_US-lessac-medium.onnx"
 
 if [ -f "$PIPER_BIN" ] && [ -f "$PIPER_MODEL" ]; then
     echo "  ✅ Piper already installed at $PIPER_BIN"

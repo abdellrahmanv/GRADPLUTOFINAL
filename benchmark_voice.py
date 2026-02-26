@@ -46,8 +46,8 @@ OLLAMA_HOST = "http://localhost:11434"
 OLLAMA_MODEL = "qwen2.5:0.5b-instruct-q2_k"
 MAX_TOKENS = 80
 
-PIPER_BINARY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "piper", "piper")
-PIPER_MODEL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "en_US-lessac-medium.onnx")
+PIPER_BINARY = os.path.expanduser("~/pluto-v2/piper/piper")
+PIPER_MODEL = os.path.expanduser("~/pluto-v2/models/en_US-lessac-medium.onnx")
 
 WHISPER_MODEL_SIZE = "base"
 WHISPER_COMPUTE_TYPE = "int8"
